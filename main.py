@@ -54,8 +54,11 @@ while not glfw.window_should_close(window):
     t = glfw.get_time()
     offset = np.sin(t * 3.0) * 0.4
 
-    # We RE-CREATE the pipeline with the new offset hardcoded into the string
-    # This bypasses the need for uniforms or buffers entirely
+    # Let's change the color over time too!
+    r = 0.5 + 0.5 * np.sin(t)
+    g = 0.5 + 0.5 * np.sin(t + 2.0)
+    b = 0.5 + 0.5 * np.sin(t + 4.0)
+
     pipeline = ctx.pipeline(
         vertex_shader=f'''
             #version 450 core
@@ -68,11 +71,11 @@ while not glfw.window_should_close(window):
                 gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
             }}
         ''',
-        fragment_shader='''
+        fragment_shader=f'''
             #version 450 core
             layout (location = 0) out vec4 out_color;
             void main() {{
-                out_color = vec4(1.0, 0.5, 0.2, 1.0);
+                out_color = vec4({r}, {g}, {b}, 1.0);
             }}
         ''',
         framebuffer=[image],
