@@ -35,70 +35,82 @@ target = np.array([0.0, 0.0], dtype='f4') # micro-optimization
 # 3. WORKER LOGIC (No-GIL Parallel Physics)
 is_repelling = False
 
+# Updated Shared Array: [x, y, vx, vy] repeated for TRIANGLE_COUNT
+gpu_data = np.zeros((TRIANGLE_COUNT, 6), dtype='f4')
+
 
 def worker_logic(start_idx, end_idx):
     last_time = time.perf_counter()
 
-    while not glfw.window_should_close(window):
+    # Force a direct reference to the shared memory
+    my_data = gpu_data[start_idx:end_idx]
+    my_props = props[start_idx:end_idx]
+
+    while running:
         current_time = time.perf_counter()
-        dt = current_time - last_time
+        dt = min(current_time - last_time, 0.05)
         last_time = current_time
-        dt = min(dt, 0.05)
         speed_scale = dt * 60.0
 
-        for i in range(start_idx, end_idx):
-            px, py = positions[i * 2], positions[i * 2 + 1]
-            vx, vy = velocities[i * 2], velocities[i * 2 + 1]
+        for i in range(len(my_data)):
+            px, py = my_data[i, 0], my_data[i, 1]
+            vx, vy = my_data[i, 2], my_data[i, 3]
 
-            mass = props[i, 0]
-            drag = 0.94 + (props[i, 1] * 0.02)
+            # data structure: [0]=pos.x, [1]=pos.y, [2]=vel.x, [3]=vel.y
+            dx = target[0] - my_data[i, 0]
+            dy = target[1] - my_data[i, 1]
+            dist = np.sqrt(dx * dx + dy * dy) + 1.0
 
-            # Vector from triangle to mouse
-            dx = target[0] - px
-            dy = target[1] - py
-            dist_sq = dx * dx + dy * dy
-            dist = np.sqrt(dist_sq) + 1.0
+            mass = my_props[i, 0]  # Now used!
+            drag = 0.94 + (my_props[i, 1] * 0.02)
 
             if is_repelling:
-                # --- SHOCKWAVE MODE ---
-                # Violent push away that gets weaker with distance (1/r)
                 mag = -15.0 / (dist / 50.0 + 1.0)
-                ax = (dx / dist) * mag
-                ay = (dy / dist) * mag
             else:
-                # --- WHIRLPOOL MODE ---
-                # 1. Gentle attraction to the center
-                ax = (dx / dist) * 0.5
-                ay = (dy / dist) * 0.5
+                mag = 0.5 / (dist / 100.0 + 1.0)
 
-                # 2. Tangential Force (The Swirl)
-                # This creates the "Orbit" effect
-                swirl_strength = 2.0 / (dist / 100.0 + 1.0)
-                ax += (-dy / dist) * swirl_strength
-                ay += (dx / dist) * swirl_strength
+            # Divide force by mass (f=ma -> a=f/m)
+            ax = ((dx / dist) * mag) / mass
+            ay = ((dy / dist) * mag) / mass
 
-            # Add personality turbulence
-            ax += np.sin(current_time * 2.5 + i) * 0.2
-            ay += np.cos(current_time * 3.1 + i) * 0.2
+            if not is_repelling:
+                swirl = 2.0 / (dist / 100.0 + 1.0)
+                ax += ((-dy / dist) * swirl) / mass
+                ay += ((dx / dist) * swirl) / mass
 
-            # Apply forces
             new_vx = (vx + ax * speed_scale) * (drag ** speed_scale)
             new_vy = (vy + ay * speed_scale) * (drag ** speed_scale)
 
-            velocities[i * 2] = new_vx
-            velocities[i * 2 + 1] = new_vy
-            positions[i * 2] += new_vx * speed_scale
-            positions[i * 2 + 1] += new_vy * speed_scale
+            my_data[i, 2] = new_vx
+            my_data[i, 3] = new_vy
+            my_data[i, 0] = px + new_vx * speed_scale
+            my_data[i, 1] = py + new_vy * speed_scale
 
-            # --- Screen Wrap (1280x720 window -> 640/360 coords) ---
-            if positions[i * 2] > 650: positions[i * 2] = -650
-            if positions[i * 2] < -650: positions[i * 2] = 650
-            if positions[i * 2 + 1] > 370: positions[i * 2 + 1] = -370
-            if positions[i * 2 + 1] < -370: positions[i * 2 + 1] = 370
-        # In No-GIL 3.14t, sleep(0) allows the thread to yield
-        # but run as fast as the OS allows.
-        time.sleep(0.001) # unless CPU usage bothers you
+            # 4. ENERGY calculation
+            dist = np.sqrt(dx * dx + dy * dy) + 1.0
+            my_data[i, 4] = 0.5 * mass * (new_vx ** 2 + new_vy ** 2)  # Kinetic
+            my_data[i, 5] = mass * (dist * 0.01)  # Potential
 
+            # Boundary Wrap
+            if my_data[i, 0] > 650:
+                my_data[i, 0] = -650
+            elif my_data[i, 0] < -640:
+                my_data[i, 0] = 650
+            if my_data[i, 1] > 370:
+                my_data[i, 1] = -370
+            elif my_data[i, 1] < -370:
+                my_data[i, 1] = 370
+
+        time.sleep(0.001)
+
+# Random positions between -600 and 600
+gpu_data[:, 0] = np.random.uniform(-600, 600, TRIANGLE_COUNT)
+gpu_data[:, 1] = np.random.uniform(-350, 350, TRIANGLE_COUNT)
+# Small random initial velocity so they aren't "static"
+gpu_data[:, 2:4] = np.random.uniform(-1, 1, (TRIANGLE_COUNT, 2))
+
+# Use a flag instead of glfw call in workers
+running = True
 
 step = TRIANGLE_COUNT // NUM_WORKERS
 for i in range(NUM_WORKERS):
@@ -107,31 +119,46 @@ for i in range(NUM_WORKERS):
 
 # 4. PIPELINE SETUP
 shape_buffer = ctx.buffer(np.array([0, 0.03, -0.01, -0.01, 0.01, -0.01], dtype='f4'))
-instance_buffer = ctx.buffer(size=TRIANGLE_COUNT * 16)
+instance_buffer = ctx.buffer(size=TRIANGLE_COUNT * 24)
 
 vertex_shader_code = '''
     #version 450 core
-    layout (location = 0) in vec2 in_vert; 
-    layout (location = 1) in vec4 in_inst; 
-    out float v_speed;
+    layout (location = 0) in vec2 in_vert;   // The triangle mesh
+    layout (location = 1) in vec4 in_inst;   // x, y, vx, vy
+    layout (location = 2) in vec2 in_energy; // kinetic, potential
+    
+    out float v_energy; // Sending this to the fragment shader
+    
     void main() {
+        // 1. Assign values from our input vectors
         vec2 pos = in_inst.xy;
         vec2 vel = in_inst.zw;
-        v_speed = length(vel);
+        
+        // 2. Calculate Total Energy for the fragment shader
+        // We can also normalize it here so it's 0.0 to 1.0
+        // Adjust 0.005 based on how "bright" you want the swarm to be
+        v_energy = clamp((in_energy.x + in_energy.y) * 0.005, 0.0, 1.0);
+    
+        // 3. Rotation logic based on velocity
         float angle = atan(vel.y, vel.x) - 1.5708;
         mat2 rot = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+        
+        // 4. Final Position
         gl_Position = vec4((rot * in_vert) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
     }
 '''
 
 fragment_shader_code = '''
     #version 450 core
-    in float v_speed;
+    in float v_energy;
     layout (location = 0) out vec4 out_color;
+    
     void main() {
-        vec3 low = vec3(0.1, 0.4, 0.9);
-        vec3 high = vec3(1.0, 0.8, 0.3);
-        out_color = vec4(mix(low, high, clamp(v_speed * 0.05, 0.0, 1.0)), 1.0);
+        // Blue for low energy, Red/Orange for high kinetic/potential energy
+        vec3 cold = vec3(0.05, 0.1, 0.4); 
+        vec3 hot = vec3(1.0, 0.9, 0.4);
+        
+        out_color = vec4(mix(cold, hot, v_energy), 1.0);
     }
 '''
 
@@ -143,9 +170,10 @@ pipeline = ctx.pipeline(
     vertex_count=3,
     instance_count=TRIANGLE_COUNT,
     vertex_buffers=[
-        # Use * to unpack the lists returned by zengl.bind
         *zengl.bind(shape_buffer, '2f', 0),
-        *zengl.bind(instance_buffer, '4f /i', 1),
+        # '4f 2f /i' means:
+        # Read 4 floats for location 1, then 2 floats for location 2, then move to next instance
+        *zengl.bind(instance_buffer, '4f 2f /i', 1, 2),
     ],
 )
 
@@ -176,35 +204,63 @@ fade_pipeline = ctx.pipeline(
     blend=blend_settings,
 )
 
+# Create two buffers and two pipelines tied to them
+instance_buffers = [
+    ctx.buffer(size=TRIANGLE_COUNT * 24),
+    ctx.buffer(size=TRIANGLE_COUNT * 24)
+]
+
+swarm_pipelines = [
+    ctx.pipeline(
+        vertex_shader=vertex_shader_code,
+        fragment_shader=fragment_shader_code,
+        framebuffer=[image],
+        topology='triangles',
+        vertex_count=3,
+        instance_count=TRIANGLE_COUNT,
+        vertex_buffers=[
+            *zengl.bind(shape_buffer, '2f', 0),
+            # MAKE SURE THIS SAYS instance_buffers[i] (with an 's')
+            *zengl.bind(instance_buffers[i], '4f 2f /i', 1, 2),
+        ],
+    ) for i in range(2)
+]
+
 # 5. RENDER LOOP
-gpu_data = np.zeros((TRIANGLE_COUNT, 4), dtype='f4')
 
 prev_frame_time = 0
 
+frame_idx = 0
 while not glfw.window_should_close(window):
     mx, my = glfw.get_cursor_pos(window)
     is_repelling = glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
     target[0], target[1] = mx - 640, 360 - my
 
     ctx.new_frame()
+    fade_pipeline.render()
 
+    # --- PING-PONG BUFFERS ---
+    curr_idx = frame_idx % 2
+
+    # 1. Write the pre-formatted data to the next buffer
+    instance_buffers[curr_idx].write(gpu_data)
+
+    # 2. Render from that buffer
+    swarm_pipelines[curr_idx].render()
+
+    # 3. Force Sync (The "Truth" check)
+    _ = image.read(size=(1, 1))
+
+    # --- METRICS ---
     now = time.perf_counter()
     fps = 1.0 / (now - prev_frame_time) if (now - prev_frame_time) > 0 else 0
     prev_frame_time = now
-    glfw.set_window_title(window, f"{gil_tpl} | FPS: {int(fps)}")
+    glfw.set_window_title(window, f"{gil_tpl} | True FPS: {int(fps)}")
 
-    # Instead of image.clear(), we draw the fade quad
-    fade_pipeline.render()
-
-    # Update instance buffer in one big chunk
-    gpu_data[:, 0:2] = positions.reshape(-1, 2)
-    gpu_data[:, 2:4] = velocities.reshape(-1, 2)
-    instance_buffer.write(gpu_data)
-
-    pipeline.render()
     image.blit()
     ctx.end_frame()
     glfw.swap_buffers(window)
     glfw.poll_events()
+    frame_idx += 1
 
 glfw.terminate()
