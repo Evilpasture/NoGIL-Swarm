@@ -1,3 +1,5 @@
+import struct
+
 import glfw
 import zengl
 import numpy as np
@@ -88,14 +90,25 @@ def worker_logic(start_idx, end_idx):
 for s, e in chunks:
     threading.Thread(target=worker_logic, args=(s, e), daemon=True).start()
 
-# 4. RE-USE THE SAME PIPELINE (Performance trick)
-# We use one pipeline and just change the viewport per draw call
+# 4. PIPELINE
+# We don't need a manual buffer for standard uniforms;
+# ZenGL will manage the memory for us.
 pipeline = ctx.pipeline(
     vertex_shader='''
         #version 450 core
+        uniform vec2 pos;
+        uniform float angle;
+
         void main() {
-            vec2 v[3] = vec2[](vec2(0, 0.02), vec2(-0.015, -0.015), vec2(0.015, -0.015));
-            gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+            // Correct Column-Major Rotation Matrix
+            mat2 rot = mat2(
+                cos(angle),  sin(angle), // Column 0
+                -sin(angle), cos(angle)  // Column 1
+            );
+            vec2 v[3] = vec2[](vec2(0, 0.03), vec2(-0.015, -0.015), vec2(0.015, -0.015));
+
+            // Convert to NDC (-1.0 to 1.0)
+            gl_Position = vec4((rot * v[gl_VertexID]) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
         }
     ''',
     fragment_shader='''
@@ -106,25 +119,50 @@ pipeline = ctx.pipeline(
     framebuffer=[image],
     topology='triangles',
     vertex_count=3,
+    # Tell ZenGL to prepare these specific uniform slots
+    uniforms={
+        'pos': [0.0, 0.0],
+        'angle': 0.0,
+    },
 )
 
 # 5. RENDER LOOP
+
+# Create a dictionary to store the "last known" angle for each triangle
+# This prevents them from snapping to "Left" when they stop moving
+last_angles = np.zeros(TRIANGLE_COUNT)
+
 while not glfw.window_should_close(window):
     mx, my = glfw.get_cursor_pos(window)
-    # Convert window pixels to our coordinate system
     target[0] = mx - 640
     target[1] = 360 - my
 
     ctx.new_frame()
     image.clear()
 
-    # Draw all triangles using the data filled by workers
-    for i in range(TRIANGLE_COUNT):
-        tx = positions[i * 2]
-        ty = positions[i * 2 + 1]
+    ctx.new_frame()
+    image.clear()
 
-        # Use the viewport trick to place the triangle
-        pipeline.viewport = (int(tx), int(ty), 1280, 720)
+    for i in range(TRIANGLE_COUNT):
+        tx, ty = positions[i * 2], positions[i * 2 + 1]
+        vx, vy = velocities[i * 2], velocities[i * 2 + 1]
+
+        # 1. Only update the angle if moving fast enough (dead zone)
+        speed_sq = vx * vx + vy * vy
+        if speed_sq > 0.1:
+            # We add pi/2 because the triangle's "tip" in our vertex array is (0, 0.03)
+            # which is "Up", but atan2 starts at "Right" (0 radians)
+            target_angle = np.arctan2(vy, vx) - (np.pi / 2)
+
+            # Simple interpolation to make rotation smooth
+            last_angles[i] = target_angle
+
+        current_angle = last_angles[i]
+
+        # 2. Update the uniforms using the [:] memory view trick
+        pipeline.uniforms['pos'][:] = struct.pack('2f', float(tx), float(ty))
+        pipeline.uniforms['angle'][:] = struct.pack('f', float(current_angle))
+
         pipeline.render()
 
     image.blit()
