@@ -21,14 +21,16 @@ ctx = zengl.context()
 image = ctx.image((1280, 720), 'rgba8unorm')
 
 # 2. CONFIGURATIONS
-TRIANGLE_COUNT = 2000
+TRIANGLE_COUNT = 1000
 NUM_WORKERS = 6
 
 # Shared arrays for workers
 positions = np.zeros(TRIANGLE_COUNT * 2, dtype='f4')
 velocities = np.zeros(TRIANGLE_COUNT * 2, dtype='f4')
 # Individual personalities: [mass, drag, offset_x, offset_y]
-props = np.random.uniform(0.5, 1.5, (TRIANGLE_COUNT, 4)).astype('f4')
+# Smaller range = more cohesive swarm
+# [mass, drag, extra1, extra2]
+props = np.random.uniform(0.9, 1.1, (TRIANGLE_COUNT, 4)).astype('f4')
 target = np.array([0.0, 0.0], dtype='f4') # micro-optimization
 
 
@@ -38,69 +40,73 @@ is_repelling = False
 # Updated Shared Array: [x, y, vx, vy] repeated for TRIANGLE_COUNT
 gpu_data = np.zeros((TRIANGLE_COUNT, 6), dtype='f4')
 
-
+# Where physics go to the back of my mind
 def worker_logic(start_idx, end_idx):
     last_time = time.perf_counter()
-
-    # Force a direct reference to the shared memory
     my_data = gpu_data[start_idx:end_idx]
     my_props = props[start_idx:end_idx]
 
     while running:
         current_time = time.perf_counter()
-        dt = min(current_time - last_time, 0.05)
+        # DT is the actual time elapsed (e.g., 0.016s for 60fps)
+        dt = min(current_time - last_time, 0.033)
         last_time = current_time
-        speed_scale = dt * 60.0
 
-        for i in range(len(my_data)):
-            px, py = my_data[i, 0], my_data[i, 1]
-            vx, vy = my_data[i, 2], my_data[i, 3]
+        # 1. Distance Math
+        dx = target[0] - my_data[:, 0]
+        dy = target[1] - my_data[:, 1]
+        dist_sq = dx ** 2 + dy ** 2
+        dist = np.sqrt(dist_sq) + 1.0
+        inv_dist = 1.0 / dist
 
-            # data structure: [0]=pos.x, [1]=pos.y, [2]=vel.x, [3]=vel.y
-            dx = target[0] - my_data[i, 0]
-            dy = target[1] - my_data[i, 1]
-            dist = np.sqrt(dx * dx + dy * dy) + 1.0
+        # 2. Force Summation (Acceleration)
+        # --- PHYSICS TUNING ---
+        if is_repelling:
+            # 1. THE EXPLOSION (Telemetry: Instant White/Yellow)
+            mag = -80000.0 / (dist_sq + 25.0)
+            ax, ay = (dx * inv_dist * mag), (dy * inv_dist * mag)
+            drag_val = 0.999  # Very low drag to allow 'travel'
+        else:
+            # 2. THE LIQUID (Telemetry: Cooling to Blue)
+            mag = 250.0 / (dist + 50.0)
+            ax = (dx * inv_dist * mag) / my_props[:, 0]
+            ay = (dy * inv_dist * mag) / my_props[:, 0]
 
-            mass = my_props[i, 0]  # Now used!
-            drag = 0.94 + (my_props[i, 1] * 0.02)
+            # Increase swirl to force them to 'work' for their energy
+            swirl_mag = 600.0 / (dist + 50.0)
+            ax += ((-dy * inv_dist) * swirl_mag) / my_props[:, 0]
+            ay += ((dx * inv_dist) * swirl_mag) / my_props[:, 0]
 
-            if is_repelling:
-                mag = -15.0 / (dist / 50.0 + 1.0)
-            else:
-                mag = 0.5 / (dist / 100.0 + 1.0)
+            # A bit more drag (0.92 instead of 0.95) will make them cool down faster
+            drag_val = 0.92
 
-            # Divide force by mass (f=ma -> a=f/m)
-            ax = ((dx / dist) * mag) / mass
-            ay = ((dy / dist) * mag) / mass
+            # --- THE STABILIZER ---
+        # This ensures that triangles ALWAYS lose energy over time
+        # unless they are being actively pushed.
+        v_mag_sq = my_data[:, 2] ** 2 + my_data[:, 3] ** 2
+        actual_drag = (drag_val ** dt) * (0.95 ** (v_mag_sq * 0.00001 * dt))
 
-            if not is_repelling:
-                swirl = 2.0 / (dist / 100.0 + 1.0)
-                ax += ((-dy / dist) * swirl) / mass
-                ay += ((dx / dist) * swirl) / mass
+        my_data[:, 2] = (my_data[:, 2] + ax * dt) * actual_drag
+        my_data[:, 3] = (my_data[:, 3] + ay * dt) * actual_drag
 
-            new_vx = (vx + ax * speed_scale) * (drag ** speed_scale)
-            new_vy = (vy + ay * speed_scale) * (drag ** speed_scale)
+        # Position update: p = p + v * dt
+        # (Multiplier 60.0 keeps the coordinate scale comfortable)
+        my_data[:, 0] += my_data[:, 2] * dt * 60.0
+        my_data[:, 1] += my_data[:, 3] * dt * 60.0
 
-            my_data[i, 2] = new_vx
-            my_data[i, 3] = new_vy
-            my_data[i, 0] = px + new_vx * speed_scale
-            my_data[i, 1] = py + new_vy * speed_scale
+        # 5. Energy (Color Data)
+        # Kinetic: 0.5 * m * v^2
+        my_data[:, 4] = 0.5 * my_props[:, 0] * (my_data[:, 2] ** 2 + my_data[:, 3] ** 2)
+        # Potential: distance based
+        my_data[:, 5] = my_props[:, 0] * (dist * 0.01)
 
-            # 4. ENERGY calculation
-            dist = np.sqrt(dx * dx + dy * dy) + 1.0
-            my_data[i, 4] = 0.5 * mass * (new_vx ** 2 + new_vy ** 2)  # Kinetic
-            my_data[i, 5] = mass * (dist * 0.01)  # Potential
+        # 6. Screen Wrap
+        my_data[my_data[:, 0] > 650, 0] = -650
+        my_data[my_data[:, 0] < -650, 0] = 650
+        my_data[my_data[:, 1] > 370, 1] = -370
+        my_data[my_data[:, 1] < -370, 1] = 370
 
-            # Boundary Wrap
-            if my_data[i, 0] > 650:
-                my_data[i, 0] = -650
-            elif my_data[i, 0] < -640:
-                my_data[i, 0] = 650
-            if my_data[i, 1] > 370:
-                my_data[i, 1] = -370
-            elif my_data[i, 1] < -370:
-                my_data[i, 1] = 370
-
+        # High-performance sleep (yields CPU to other workers)
         time.sleep(0.001)
 
 # Random positions between -600 and 600
@@ -136,15 +142,17 @@ vertex_shader_code = '''
         
         // 2. Calculate Total Energy for the fragment shader
         // We can also normalize it here so it's 0.0 to 1.0
-        // Adjust 0.005 based on how "bright" you want the swarm to be
-        v_energy = clamp((in_energy.x + in_energy.y) * 0.005, 0.0, 1.0);
+        // Use sqrt to "crush" the high values so the color transition is smoother
+        v_energy = clamp(sqrt(in_energy.x + in_energy.y) * 0.1, 0.0, 1.0);
     
         // 3. Rotation logic based on velocity
         float angle = atan(vel.y, vel.x) - 1.5708;
         mat2 rot = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
         
         // 4. Final Position
-        gl_Position = vec4((rot * in_vert) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
+        // Base size is 1.0, but high-energy triangles grow up to 3.0x
+        float scale = 1.0 + (v_energy * 2.0); 
+        gl_Position = vec4((rot * in_vert * scale) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
     }
 '''
 
