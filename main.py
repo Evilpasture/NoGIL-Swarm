@@ -49,24 +49,27 @@ pipeline = ctx.pipeline(
     vertex_count=3,
 )
 
-# 3. Main Loop
 while not glfw.window_should_close(window):
     t = glfw.get_time()
-    offset = np.sin(t * 3.0) * 0.4
+    aspect = 1280 / 720  # The ratio of your window
 
-    # Let's change the color over time too!
-    r = 0.5 + 0.5 * np.sin(t)
-    g = 0.5 + 0.5 * np.sin(t + 2.0)
-    b = 0.5 + 0.5 * np.sin(t + 4.0)
+    sides = int(3 + (t % 5))
+    r, g, b = 0.5 + 0.5 * np.sin(t), 0.5 + 0.5 * np.sin(t + 2), 0.5 + 0.5 * np.sin(t + 4)
+
+    vert_list = []
+    for i in range(sides):
+        angle = (i / sides) * 2.0 * np.pi
+        # We divide X by aspect to un-squash it
+        vx = (np.cos(angle) * 0.5) / aspect
+        vy = np.sin(angle) * 0.5
+        vert_list.append(f"vec2({vx}, {vy})")
+
+    verts_string = ", ".join(vert_list)
 
     pipeline = ctx.pipeline(
         vertex_shader=f'''
             #version 450 core
-            vec2 vertices[3] = vec2[](
-                vec2(0.0 + {offset}, 0.8),
-                vec2(-0.866 + {offset}, -0.7),
-                vec2(0.866 + {offset}, -0.7)
-            );
+            vec2 vertices[{sides}] = vec2[]({verts_string});
             void main() {{
                 gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
             }}
@@ -79,8 +82,8 @@ while not glfw.window_should_close(window):
             }}
         ''',
         framebuffer=[image],
-        topology='triangles',
-        vertex_count=3,
+        topology='triangle_fan',
+        vertex_count=sides,
     )
 
     ctx.new_frame()
