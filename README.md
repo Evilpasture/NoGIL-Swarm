@@ -4,15 +4,27 @@ Watch demo video
 
 ## INSTALLATION!!!!!!!!!!
 
-This project requires Python 3.14+ (Free-Threaded build) to demonstrate the removal of the Global Interpreter Lock (GIL). Open your terminal and follow.
+This project requires Python 3.14+ (Free-Threaded build) to demonstrate the removal of the Global Interpreter Lock (GIL). 
+
+Open your terminal and follow.
+
+Assuming you have Python Install Manager, and **NOT** the old Python Launcher,
+
+```bash
+py install 3.14t
+```
+then do this just in case, if it's installed then use that Python and you're good to go
+```bash
+py --list
+```
 
 ### Install Dependencies:
-```
+```bash
 pip install zengl glfw numpy
 ```
 ### Run with GIL Disabled: 
 To unlock the 6 physics worker threads, you **MUST** use the -X gil=0 flag:
-```
+```bash
 python -X gil=0 main.py
 ```
 Verify No-GIL Status: If running correctly, your terminal should not show any GIL warnings, and your CPU usage should be distributed across multiple cores (check Task Manager/HTOP).
