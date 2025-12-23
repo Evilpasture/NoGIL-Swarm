@@ -29,7 +29,7 @@ positions = np.zeros(TRIANGLE_COUNT * 2, dtype='f4')
 velocities = np.zeros(TRIANGLE_COUNT * 2, dtype='f4')
 # Individual personalities: [mass, drag, offset_x, offset_y]
 props = np.random.uniform(0.5, 1.5, (TRIANGLE_COUNT, 4)).astype('f4')
-target = [0.0, 0.0]
+target = np.array([0.0, 0.0], dtype='f4') # micro-optimization
 
 
 # 3. WORKER LOGIC (No-GIL Parallel Physics)
