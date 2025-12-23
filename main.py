@@ -58,97 +58,78 @@ running = True
 is_repelling = False
 
 
+m_prev_x, m_prev_y = glfw.get_cursor_pos(window)
+mouse_vel = np.array([0.0, 0.0], dtype='f4')
+
+
 # 3. WORKER LOGIC (Free-Threaded)
 def worker_logic(start_idx, end_idx):
     my_data = gpu_data[start_idx:end_idx]
     my_props = props[start_idx:end_idx]
 
-    # Pre-allocate slice views to avoid Python object creation overhead in loop
-    pos_x = my_data[:, 0]
-    pos_y = my_data[:, 1]
-    vel_x = my_data[:, 2]
-    vel_y = my_data[:, 3]
-
+    # Pre-allocate slice views
+    pos_x, pos_y = my_data[:, 0], my_data[:, 1]
+    vel_x, vel_y = my_data[:, 2], my_data[:, 3]
     dt = 0.01
 
     while running:
-        # Use global time to sync all worker pulses
+        # 1. Global Sync Pulse
         t = time.perf_counter()
-        # Pulse goes from 0.7 to 1.3, three times per second
-        pulse = (np.sin(t * 3.0) * 0.3) + 1.0
+        pulse = (np.sin(t * 4.0) * 0.4) + 1.0
 
-        # 1. Distances
-        dx = target[0] - pos_x
-        dy = target[1] - pos_y
+        # 2. Distance Math
+        dx, dy = target[0] - pos_x, target[1] - pos_y
+        dist_sq = dx * dx + dy * dy + 60.0  # Slightly higher softening
+        inv_dist = 1.0 / np.sqrt(dist_sq)
 
-        # Softening parameter is crucial for stability
-        dist_sq = dx * dx + dy * dy + 50.0
-
-        # Fast inverse square root approximation (or just standard sqrt)
-        # np.sqrt is highly optimized in NumPy 2.x
-        dist = np.sqrt(dist_sq)
-        inv_dist = 1.0 / dist
-
-        # 2. Forces
-
+        # 3. Force Calculation
         if is_repelling:
-            # Shockwave: violent and chaotic
-            force = -REPULSE_FORCE * (inv_dist ** 2.8) * 150.0
-            ax = (dx * force + np.random.uniform(-15, 15, len(dx))) / my_props[:, 0]
-            ay = (dy * force + np.random.uniform(-15, 15, len(dy))) / my_props[:, 0]
+            # SHOCKWAVE: High-power inverse cubic
+            force = -REPULSE_FORCE * (inv_dist ** 3) * 12000.0
+            # Add chaotic turbulence and slant it with mouse movement
+            ax = (dx * force + mouse_vel[0] * 8.0 + np.random.uniform(-10, 10, len(dx))) / my_props[:, 0]
+            ay = (dy * force + mouse_vel[1] * 8.0 + np.random.uniform(-10, 10, len(dy))) / my_props[:, 0]
         else:
-            # RIVER: Apply the pulse here!
+            # RIVER: Pulsing attraction + Mouse Wind
             force = (ATTRACT_FORCE * pulse) * inv_dist
-            ax = (dx * force) / my_props[:, 0]
-            ay = (dy * force) / my_props[:, 0]
+            wind_str = 25.0 * (inv_dist ** 1.5)
 
-            # Swirl (Keep this steady for flow)
-            swirl_mag = 18.0 * inv_dist
+            ax = (dx * force + mouse_vel[0] * wind_str) / my_props[:, 0]
+            ay = (dy * force + mouse_vel[1] * wind_str) / my_props[:, 0]
+
+            # SWIRL
+            swirl_mag = 22.0 * inv_dist
             ax -= (dy * swirl_mag) / my_props[:, 0]
             ay += (dx * swirl_mag) / my_props[:, 0]
 
-        # Re-introduce mass as a divisor for acceleration
-        ax = (dx * force) / my_props[:, 0]
-        ay = (dy * force) / my_props[:, 0]
-
-        # Swirl
-        if not is_repelling:
-            swirl_mag = 15.0 * inv_dist
-            ax -= dy * swirl_mag
-            ay += dx * swirl_mag
-
-        # 3. Integration
+        # 4. Integration (Semi-Implicit)
         vel_x += ax * dt
         vel_y += ay * dt
 
+        # Apply Friction
         vel_x *= FRICTION
         vel_y *= FRICTION
 
-        # 4. Hard Speed Limit (Essential for stability)
+        # Hard Speed Cap
         speed_sq = vel_x * vel_x + vel_y * vel_y
-        # Optimization: Boolean indexing is fast, but in-place where is faster in 3.14
         over_limit = speed_sq > (MAX_SPEED * MAX_SPEED)
         if np.any(over_limit):
             scale = MAX_SPEED / np.sqrt(speed_sq[over_limit])
             vel_x[over_limit] *= scale
             vel_y[over_limit] *= scale
 
-        # Update Positions
+        # Position Update
         pos_x += vel_x
         pos_y += vel_y
 
         # Screen Wrap
-        # Using raw boolean masks
         np.putmask(pos_x, pos_x > 650, -650)
         np.putmask(pos_x, pos_x < -650, 650)
         np.putmask(pos_y, pos_y > 370, -370)
         np.putmask(pos_y, pos_y < -370, 370)
 
-        # 5. Energy Calc for Colors
-        my_data[:, 4] = speed_sq * 0.015
-
-        # No sleep needed in 3.14t for purely CPU bound workers
-        # The OS scheduler is smart enough to handle 8 threads on modern CPUs
+        # Telemetry for Shader (speed squared normalized)
+        my_data[:, 4] = speed_sq * 0.012
 
 
 # Start Workers
@@ -196,14 +177,16 @@ fragment_shader = '''
     #version 450 core
     in float v_energy;
     layout (location = 0) out vec4 out_color;
+    // Fragment Shader
     void main() {
-        // Non-linear energy ramp (power of 2.5) makes the "hot" states punchier
         float e = pow(v_energy, 2.5);
         
-        vec3 cold = vec3(0.08, 0.15, 0.4);   // Deep Neon Blue
-        vec3 hot = vec3(1.8, 0.9, 0.3);    // Incandescent Orange (Overdrive > 1.0)
+        // palette: Deep Blue -> Electric Cyan -> White Hot -> Solar Orange
+        vec3 color = mix(vec3(0.02, 0.05, 0.2), vec3(0.0, 0.8, 1.0), e);
+        if (e > 0.7) {
+            color = mix(color, vec3(2.0, 1.2, 0.5), (e - 0.7) * 3.3);
+        }
         
-        vec3 color = mix(cold, hot, e);
         out_color = vec4(color, 1.0);
     }
 '''
@@ -255,6 +238,10 @@ t_prev = time.perf_counter()
 
 while not glfw.window_should_close(window):
     mx, my = glfw.get_cursor_pos(window)
+    # Calculate velocity: current - previous
+    mouse_vel[0] = mx - m_prev_x
+    mouse_vel[1] = (360 - my) - (360 - m_prev_y)  # Screen space Y is inverted
+    m_prev_x, m_prev_y = mx, my
     is_repelling = glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
     target[0] = mx - 640
     target[1] = 360 - my
