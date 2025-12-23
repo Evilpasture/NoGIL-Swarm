@@ -19,52 +19,45 @@ glfw.make_context_current(window)
 ctx = zengl.context()
 image = ctx.image((1280, 720), 'rgba8unorm')
 
-
-# Shared State
-class State:
-    pos_x = 0.0
-    pos_y = 0.0
-    color = (0.2, 0.8, 1.0)  # Neon Blue
+TRIANGLE_COUNT = 50
+triangles = []
 
 
-state = State()
+def triangle_logic(index):
+    """Each triangle has its own thread and its own logic loop."""
+    angle = random.random() * np.pi * 2
+    speed = 1.0 + random.random() * 2.0
+    radius = 100 + random.random() * 200
 
-# 2. Physics Thread (High-frequency updates)
-def physics_worker():
     while not glfw.window_should_close(window):
-        t = time.time()
-        # High speed orbit
-        state.pos_x = np.cos(t * 3.0) * 300
-        state.pos_y = np.sin(t * 3.0) * 300
-
-        # Shift color based on position
-        state.color = (0.5 + 0.5 * np.cos(t), 0.8, 0.5 + 0.5 * np.sin(t))
-        time.sleep(0.0005)  # 2000Hz updates
+        t = time.time() * speed
+        # Update this triangle's specific state
+        triangles[index]['x'] = np.cos(t + angle) * radius
+        triangles[index]['y'] = np.sin(t + angle) * radius
+        # Just a tiny sleep to yield
+        time.sleep(0.001)
 
 
-threading.Thread(target=physics_worker, daemon=True).start()
+# Initialize states and start threads
+for i in range(TRIANGLE_COUNT):
+    triangles.append({'x': 0.0, 'y': 0.0, 'color': (random.random(), random.random(), 1.0)})
+    threading.Thread(target=triangle_logic, args=(i,), daemon=True).start()
 
 
-# 3. Using 3.14 Template Strings for Shader Definitions
-# We define the source as a template that we can "reify" if needed,
-# though here we use it to keep our fragment color dynamic but clean.
-def get_pipeline(r, g, b):
-    # In 3.14, we can use the t"" prefix for template strings
-    # This keeps the shader code "pure" until we need the specific variant.
+# 3. Pipeline Generator (Still avoiding the broken uniform validator)
+def create_simple_pipeline(r, g, b):
     return ctx.pipeline(
         vertex_shader='''
             #version 450 core
             void main() {
-                vec2 vertices[3] = vec2[](vec2(0, 0.1), vec2(-0.1, -0.1), vec2(0.1, -0.1));
-                gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+                vec2 v[3] = vec2[](vec2(0, 0.05), vec2(-0.04, -0.04), vec2(0.04, -0.04));
+                gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
             }
         ''',
         fragment_shader=f'''
             #version 450 core
             layout (location = 0) out vec4 out_color;
-            void main() {{
-                out_color = vec4({r}, {g}, {b}, 1.0);
-            }}
+            void main() {{ out_color = vec4({r:.2f}, {g:.2f}, {b:.2f}, 1.0); }}
         ''',
         framebuffer=[image],
         topology='triangles',
@@ -72,30 +65,24 @@ def get_pipeline(r, g, b):
     )
 
 
-# Cache a few pipelines to avoid recompiling every single frame
-# (A simple version of what we discussed earlier)
-pipeline_cache = {}
+# Pre-cache a few colored pipelines
+pipeline_pool = [create_simple_pipeline(*t['color']) for t in triangles]
 
-# 4. Main Render Loop
+# 4. Render Loop
 while not glfw.window_should_close(window):
     ctx.new_frame()
     image.clear()
 
-    # We round the color slightly to avoid creating 60 pipelines a second
-    color_key = (round(state.color[0], 1), round(state.color[1], 1), round(state.color[2], 1))
-
-    if color_key not in pipeline_cache:
-        pipeline_cache[color_key] = get_pipeline(*color_key)
-
-    active_pipeline = pipeline_cache[color_key]
-
-    # Use our Viewport transformation for the thread-calculated position
-    active_pipeline.viewport = (int(state.pos_x), int(state.pos_y), 1280, 720)
-    active_pipeline.render()
+    # Draw all 50 triangles using their thread-updated positions
+    for i in range(TRIANGLE_COUNT):
+        p = pipeline_pool[i]
+        t_data = triangles[i]
+        # Viewport trick to move each one independently
+        p.viewport = (int(t_data['x']), int(t_data['y']), 1280, 720)
+        p.render()
 
     image.blit()
     ctx.end_frame()
-
     glfw.swap_buffers(window)
     glfw.poll_events()
 
