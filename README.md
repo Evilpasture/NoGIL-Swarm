@@ -2,7 +2,7 @@
 
 Built with [ZenGL](https://github.com/szabolcsdombi/zengl)
 
-Watch demo video
+
 
 ## INSTALLATION!!!!!!!!!!
 
