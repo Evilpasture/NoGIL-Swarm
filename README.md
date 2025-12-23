@@ -40,3 +40,5 @@ Note: If you run this on a standard (non-t) Python build, the simulation will st
 * Zero-Copy GPU Pipeline: Leverages ZenGL for hardware-accelerated instancing of 2,000+ entities with a single draw call.
 
 * Non-Linear Vector Fields: Real-time switching between tangential vortex (Whirlpool) and radial inverse-distance forces (Shockwave).
+
+Perhaps Python will finally be used in rendering? God knows.
