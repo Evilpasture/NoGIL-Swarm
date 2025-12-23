@@ -1,3 +1,6 @@
+from typing import TYPE_CHECKING
+if TYPE_CHECKING: from zengl import BlendSettings
+
 import glfw
 import zengl
 import numpy as np
@@ -121,6 +124,13 @@ pipeline = ctx.pipeline(
 )
 
 # Fade pipeline for the Trail Effect
+blend_settings: BlendSettings = {
+    'enable': True,
+    'src_color': 'src_alpha',
+    'dst_color': 'one_minus_src_alpha',
+    'src_alpha': 'one',
+    'dst_alpha': 'one_minus_src_alpha',
+}
 fade_pipeline = ctx.pipeline(
     vertex_shader='''
         #version 450 core
@@ -137,7 +147,7 @@ fade_pipeline = ctx.pipeline(
     framebuffer=[image],
     topology='triangle_strip',
     vertex_count=4,
-    blend={'enable': True, 'src_rgb': 'src_alpha', 'dst_rgb': 'one_minus_src_alpha'},
+    blend=blend_settings,
 )
 
 # 5. RENDER LOOP
