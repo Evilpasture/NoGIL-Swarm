@@ -19,32 +19,73 @@ ctx = zengl.context()
 image = ctx.image((1280, 720), 'rgba8unorm')
 
 # 2. CONFIGURATIONS
-TRIANGLE_COUNT = 2000
+TRIANGLE_COUNT = 50
 NUM_WORKERS = 8        # Match this to your CPU cores
 
 # A shared NumPy array for all positions: [x, y, x, y, ...]
 # NumPy arrays are great for 3.14t because they are essentially "raw" memory
 positions = np.zeros(TRIANGLE_COUNT * 2, dtype='f4')
+# --- Add a Velocity Array ---
+# Same size as positions, stores [vx, vy, vx, vy...]
+velocities = np.zeros(TRIANGLE_COUNT * 2, dtype='f4')
 
-# 3. WORKER LOGIC (Place this before the render loop)
+# Shared target: [x, y]
+target = [0.0, 0.0]
+
+# 3. WORKER LOGIC
+# --- Better Chunking ---
+# We calculate the chunks but ensure the last worker takes the "remainder"
+chunks = []
+step = TRIANGLE_COUNT // NUM_WORKERS
+for i in range(NUM_WORKERS):
+    start = i * step
+    # If it's the last worker, go all the way to TRIANGLE_COUNT
+    end = TRIANGLE_COUNT if i == NUM_WORKERS - 1 else (i + 1) * step
+    chunks.append((start, end))
+
+
+
+
 def worker_logic(start_idx, end_idx):
-    """Handles a slice of the triangle array."""
     while not glfw.window_should_close(window):
         t = time.time()
         for i in range(start_idx, end_idx):
-            # Calculate unique movement for this specific triangle
-            off = i * 0.05
-            radius = 50 + (i * 0.15)
-            # Update the shared array directly
-            positions[i*2] = np.cos(t + off) * radius
-            positions[i*2 + 1] = np.sin(t + off) * radius
-        # Tiny sleep to prevent 100% CPU pinning if desired
+            # 1. Get Current Data
+            px, py = positions[i * 2], positions[i * 2 + 1]
+            vx, vy = velocities[i * 2], velocities[i * 2 + 1]
+
+            # 2. Calculate Vector to Mouse (The "Pull")
+            dx = target[0] - px
+            dy = target[1] - py
+            dist = np.sqrt(dx * dx + dy * dy) + 0.1  # avoid div by zero
+
+            # Normalize and apply "Gravity" force (this section might be important mathematically, but I'm stupid
+            force = 0.5
+            ax = (dx / dist) * force
+            ay = (dy / dist) * force
+
+            # 3. Add "Turbulence" (The "Organic" part)
+            # This replaces the fan math with random-ish fluttering
+            ax += np.sin(t * 2.0 + i) * 0.2
+            ay += np.cos(t * 3.0 + i) * 0.2
+
+            # 4. Update Velocity (Acceleration -> Velocity)
+            vx += ax
+            vy += ay
+
+            # 5. Apply Drag/Friction (Prevents them from flying off to infinity)
+            vx *= 0.95
+            vy *= 0.95
+
+            # 6. Update Position (Velocity -> Position)
+            positions[i * 2] += vx
+            positions[i * 2 + 1] += vy
+
         time.sleep(0.001)
 
-# Spawn the workers
-chunk_size = TRIANGLE_COUNT // NUM_WORKERS
-for i in range(NUM_WORKERS):
-    s, e = i * chunk_size, (i + 1) * chunk_size
+
+# Spawn workers using our safe chunks
+for s, e in chunks:
     threading.Thread(target=worker_logic, args=(s, e), daemon=True).start()
 
 # 4. RE-USE THE SAME PIPELINE (Performance trick)
@@ -69,6 +110,11 @@ pipeline = ctx.pipeline(
 
 # 5. RENDER LOOP
 while not glfw.window_should_close(window):
+    mx, my = glfw.get_cursor_pos(window)
+    # Convert window pixels to our coordinate system
+    target[0] = mx - 640
+    target[1] = 360 - my
+
     ctx.new_frame()
     image.clear()
 
