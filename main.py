@@ -61,8 +61,8 @@ def worker_logic(start_idx, end_idx):
             ay = (dy / dist) * force_mult / mass
 
             # Organic fluttering
-            ax += np.sin(t * 2.5 + i) * 0.2
-            ay += np.cos(t * 3.1 + i) * 0.2
+            ax += np.sin(t * 10.0 + i) * 1.5  # Faster, stronger oscillation
+            ay += np.cos(t * 12.0 + i) * 1.5
 
             velocities[i * 2] = (vx + ax) * drag
             velocities[i * 2 + 1] = (vy + ay) * drag
