@@ -22,7 +22,7 @@ image = ctx.image((1280, 720), 'rgba8unorm')
 
 # 2. CONFIGURATIONS
 TRIANGLE_COUNT = 50
-NUM_WORKERS = 8        # Match this to your CPU cores
+NUM_WORKERS = 6        # Match this to your CPU cores
 
 # A shared NumPy array for all positions: [x, y, x, y, ...]
 # NumPy arrays are great for 3.14t because they are essentially "raw" memory
@@ -44,9 +44,6 @@ for i in range(NUM_WORKERS):
     # If it's the last worker, go all the way to TRIANGLE_COUNT
     end = TRIANGLE_COUNT if i == NUM_WORKERS - 1 else (i + 1) * step
     chunks.append((start, end))
-
-
-
 
 def worker_logic(start_idx, end_idx):
     while not glfw.window_should_close(window):
