@@ -41,4 +41,4 @@ Note: If you run this on a standard (non-t) Python build, the simulation will st
 
 * Non-Linear Vector Fields: Real-time switching between tangential vortex (Whirlpool) and radial inverse-distance forces (Shockwave).
 
-Perhaps Python will finally be used in rendering? God knows.
+Perhaps Python will finally be used in rendering? God knows. All I know is that I wrestled with the pipeline of ZenGL, and I had to use ZenGL as my first renderer.
