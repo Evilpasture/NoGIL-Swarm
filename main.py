@@ -3,38 +3,27 @@ import zengl
 import numpy as np
 import sys
 
-# 1. Initialize Window
 if not glfw.init():
     sys.exit()
 
-window = glfw.create_window(1280, 720, "3.14t | ZenGL Zero-Resource", None, None)
+window = glfw.create_window(1280, 720, "3.14t | The Last Stand", None, None)
 glfw.make_context_current(window)
 
-# 2. ZenGL Setup
 ctx = zengl.context()
 image = ctx.image((1280, 720), 'rgba8unorm')
 
-# We are using NO buffers. No VBO, no Uniforms.
+# This pipeline is STATIC. It never changes.
 pipeline = ctx.pipeline(
     vertex_shader='''
         #version 450 core
-
-        // We pass the time/offset through the gl_InstanceID or a constant
-        // For this test, let's hardcode the vertices and use a constant.
-
-        vec2 vertices[3] = vec2[](
-            vec2(0.0, 0.8),
-            vec2(-0.866, -0.7),
-            vec2(0.866, -0.7)
-        );
-
-        // We use a constant that we will replace in the string
-        #define OFFSET 0.0
-
         void main() {
-            vec2 pos = vertices[gl_VertexID];
-            pos.x += OFFSET;
-            gl_Position = vec4(pos, 0.0, 1.0);
+            vec2 vertices[3] = vec2[](
+                vec2(0.0, 0.5),
+                vec2(-0.5, -0.5),
+                vec2(0.5, -0.5)
+            );
+            // We use the gl_Position directly.
+            gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
         }
     ''',
     fragment_shader='''
@@ -50,45 +39,26 @@ pipeline = ctx.pipeline(
 )
 
 while not glfw.window_should_close(window):
-    t = glfw.get_time()
-    aspect = 1280 / 720  # The ratio of your window
+    mx, my = glfw.get_cursor_pos(window)
 
-    sides = int(3 + (t % 5))
-    r, g, b = 0.5 + 0.5 * np.sin(t), 0.5 + 0.5 * np.sin(t + 2), 0.5 + 0.5 * np.sin(t + 4)
-
-    vert_list = []
-    for i in range(sides):
-        angle = (i / sides) * 2.0 * np.pi
-        # We divide X by aspect to un-squash it
-        vx = (np.cos(angle) * 0.5) / aspect
-        vy = np.sin(angle) * 0.5
-        vert_list.append(f"vec2({vx}, {vy})")
-
-    verts_string = ", ".join(vert_list)
-
-    pipeline = ctx.pipeline(
-        vertex_shader=f'''
-            #version 450 core
-            vec2 vertices[{sides}] = vec2[]({verts_string});
-            void main() {{
-                gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
-            }}
-        ''',
-        fragment_shader=f'''
-            #version 450 core
-            layout (location = 0) out vec4 out_color;
-            void main() {{
-                out_color = vec4({r}, {g}, {b}, 1.0);
-            }}
-        ''',
-        framebuffer=[image],
-        topology='triangle_fan',
-        vertex_count=sides,
-    )
+    # PRODUCTION TRICK:
+    # Instead of moving the triangle in the shader (which is broken),
+    # we move the VIEWPORT where the triangle is drawn.
 
     ctx.new_frame()
     image.clear()
+
+    # We "shift" the world by changing the viewport
+    # to follow the mouse.
+    # Scaling pulse
+    pulse = 1.0 + 0.2 * np.sin(glfw.get_time() * 5.0)
+    v_w = int(1280 * pulse)
+    v_h = int(720 * pulse)
+
+    # Center it on the mouse
+    pipeline.viewport = (int(mx - v_w / 2), int(720 - my - v_h / 2), v_w, v_h)
     pipeline.render()
+
     image.blit()
     ctx.end_frame()
 
