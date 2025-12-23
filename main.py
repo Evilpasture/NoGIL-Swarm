@@ -34,44 +34,65 @@ target = [0.0, 0.0]
 # 3. WORKER LOGIC (No-GIL Parallel Physics)
 is_repelling = False
 
-def worker_logic(start_idx, end_idx):
-    while not glfw.window_should_close(window):
-        t = time.time()
-        for i in range(start_idx, end_idx):
-            # Screen Wrapping logic (World space is approx -640 to 640, -360 to 360)
-            if positions[i * 2] > 700: positions[i * 2] = -700
-            if positions[i * 2] < -700: positions[i * 2] = 700
-            if positions[i * 2 + 1] > 400: positions[i * 2 + 1] = -400
-            if positions[i * 2 + 1] < -400: positions[i * 2 + 1] = 400
 
+def worker_logic(start_idx, end_idx):
+    # Initialize 'last_time' for this specific thread
+    last_time = time.perf_counter()
+
+    while not glfw.window_should_close(window):
+        # Calculate Delta Time
+        current_time = time.perf_counter()
+        dt = current_time - last_time
+        last_time = current_time
+
+        # Limit dt to prevent "teleporting" if the window is dragged
+        dt = min(dt, 0.05)
+
+        # Physics scale factor (tuning the "feel" of the speed)
+        speed_scale = dt * 60.0
+
+        for i in range(start_idx, end_idx):
             px, py = positions[i * 2], positions[i * 2 + 1]
             vx, vy = velocities[i * 2], velocities[i * 2 + 1]
 
             mass = props[i, 0]
             drag = 0.94 + (props[i, 1] * 0.02)
-            # Each triangle has a unique "perch" around the mouse
             tx = target[0] + (props[i, 2] - 1.0) * 100.0
             ty = target[1] + (props[i, 3] - 1.0) * 100.0
 
             dx, dy = tx - px, ty - py
             dist = np.sqrt(dx * dx + dy * dy) + 10.0
 
-            # Acceleration with individual mass
-            # Change force direction based on global state
             force_mult = -2.0 if is_repelling else 0.8
 
+            # Apply Delta Time to Acceleration and Velocity
             ax = (dx / dist) * force_mult / mass
             ay = (dy / dist) * force_mult / mass
 
-            # Organic fluttering
-            ax += np.sin(t * 10.0 + i) * 1.5  # Faster, stronger oscillation
-            ay += np.cos(t * 12.0 + i) * 1.5
+            # Turbulence scaled by dt
+            ax += np.sin(current_time * 2.5 + i) * 0.2
+            ay += np.cos(current_time * 3.1 + i) * 0.2
 
-            velocities[i * 2] = (vx + ax) * drag
-            velocities[i * 2 + 1] = (vy + ay) * drag
-            positions[i * 2] += velocities[i * 2]
-            positions[i * 2 + 1] += velocities[i * 2 + 1]
-        time.sleep(0.005)
+            # update velocity (drag is slightly trickier with dt, but this works)
+            new_vx = (vx + ax * speed_scale) * (drag ** speed_scale)
+            new_vy = (vy + ay * speed_scale) * (drag ** speed_scale)
+
+            velocities[i * 2] = new_vx
+            velocities[i * 2 + 1] = new_vy
+
+            # Update position scaled by dt
+            positions[i * 2] += new_vx * speed_scale
+            positions[i * 2 + 1] += new_vy * speed_scale
+
+            # --- Screen Wrap ---
+            if positions[i * 2] > 700: positions[i * 2] = -700
+            if positions[i * 2] < -700: positions[i * 2] = 700
+            if positions[i * 2 + 1] > 400: positions[i * 2 + 1] = -400
+            if positions[i * 2 + 1] < -400: positions[i * 2 + 1] = 400
+
+        # In No-GIL 3.14t, sleep(0) allows the thread to yield
+        # but run as fast as the OS allows.
+        time.sleep(0.001) # unless CPU usage bothers you
 
 
 step = TRIANGLE_COUNT // NUM_WORKERS
