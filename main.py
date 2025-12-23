@@ -13,7 +13,8 @@ if not glfw.init():
     sys.exit()
 
 GIL_STATE: str = "No GIL" if sys._is_gil_enabled() == False else "GIL"
-window = glfw.create_window(1280, 720, f"3.14t Swarm | {GIL_STATE}", None, None)
+gil_tpl = f"3.14t Swarm | {GIL_STATE}"
+window = glfw.create_window(1280, 720, gil_tpl, None, None)
 glfw.make_context_current(window)
 
 ctx = zengl.context()
@@ -36,19 +37,13 @@ is_repelling = False
 
 
 def worker_logic(start_idx, end_idx):
-    # Initialize 'last_time' for this specific thread
     last_time = time.perf_counter()
 
     while not glfw.window_should_close(window):
-        # Calculate Delta Time
         current_time = time.perf_counter()
         dt = current_time - last_time
         last_time = current_time
-
-        # Limit dt to prevent "teleporting" if the window is dragged
         dt = min(dt, 0.05)
-
-        # Physics scale factor (tuning the "feel" of the speed)
         speed_scale = dt * 60.0
 
         for i in range(start_idx, end_idx):
@@ -57,39 +52,49 @@ def worker_logic(start_idx, end_idx):
 
             mass = props[i, 0]
             drag = 0.94 + (props[i, 1] * 0.02)
-            tx = target[0] + (props[i, 2] - 1.0) * 100.0
-            ty = target[1] + (props[i, 3] - 1.0) * 100.0
 
-            dx, dy = tx - px, ty - py
-            dist = np.sqrt(dx * dx + dy * dy) + 10.0
+            # Vector from triangle to mouse
+            dx = target[0] - px
+            dy = target[1] - py
+            dist_sq = dx * dx + dy * dy
+            dist = np.sqrt(dist_sq) + 1.0
 
-            force_mult = -2.0 if is_repelling else 0.8
+            if is_repelling:
+                # --- SHOCKWAVE MODE ---
+                # Violent push away that gets weaker with distance (1/r)
+                mag = -15.0 / (dist / 50.0 + 1.0)
+                ax = (dx / dist) * mag
+                ay = (dy / dist) * mag
+            else:
+                # --- WHIRLPOOL MODE ---
+                # 1. Gentle attraction to the center
+                ax = (dx / dist) * 0.5
+                ay = (dy / dist) * 0.5
 
-            # Apply Delta Time to Acceleration and Velocity
-            ax = (dx / dist) * force_mult / mass
-            ay = (dy / dist) * force_mult / mass
+                # 2. Tangential Force (The Swirl)
+                # This creates the "Orbit" effect
+                swirl_strength = 2.0 / (dist / 100.0 + 1.0)
+                ax += (-dy / dist) * swirl_strength
+                ay += (dx / dist) * swirl_strength
 
-            # Turbulence scaled by dt
+            # Add personality turbulence
             ax += np.sin(current_time * 2.5 + i) * 0.2
             ay += np.cos(current_time * 3.1 + i) * 0.2
 
-            # update velocity (drag is slightly trickier with dt, but this works)
+            # Apply forces
             new_vx = (vx + ax * speed_scale) * (drag ** speed_scale)
             new_vy = (vy + ay * speed_scale) * (drag ** speed_scale)
 
             velocities[i * 2] = new_vx
             velocities[i * 2 + 1] = new_vy
-
-            # Update position scaled by dt
             positions[i * 2] += new_vx * speed_scale
             positions[i * 2 + 1] += new_vy * speed_scale
 
-            # --- Screen Wrap ---
-            if positions[i * 2] > 700: positions[i * 2] = -700
-            if positions[i * 2] < -700: positions[i * 2] = 700
-            if positions[i * 2 + 1] > 400: positions[i * 2 + 1] = -400
-            if positions[i * 2 + 1] < -400: positions[i * 2 + 1] = 400
-
+            # --- Screen Wrap (1280x720 window -> 640/360 coords) ---
+            if positions[i * 2] > 650: positions[i * 2] = -650
+            if positions[i * 2] < -650: positions[i * 2] = 650
+            if positions[i * 2 + 1] > 370: positions[i * 2 + 1] = -370
+            if positions[i * 2 + 1] < -370: positions[i * 2 + 1] = 370
         # In No-GIL 3.14t, sleep(0) allows the thread to yield
         # but run as fast as the OS allows.
         time.sleep(0.001) # unless CPU usage bothers you
@@ -174,12 +179,19 @@ fade_pipeline = ctx.pipeline(
 # 5. RENDER LOOP
 gpu_data = np.zeros((TRIANGLE_COUNT, 4), dtype='f4')
 
+prev_frame_time = 0
+
 while not glfw.window_should_close(window):
     mx, my = glfw.get_cursor_pos(window)
     is_repelling = glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
     target[0], target[1] = mx - 640, 360 - my
 
     ctx.new_frame()
+
+    now = time.perf_counter()
+    fps = 1.0 / (now - prev_frame_time) if (now - prev_frame_time) > 0 else 0
+    prev_frame_time = now
+    glfw.set_window_title(window, f"{gil_tpl} | FPS: {int(fps)}")
 
     # Instead of image.clear(), we draw the fade quad
     fade_pipeline.render()
