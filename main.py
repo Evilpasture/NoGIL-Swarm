@@ -38,7 +38,7 @@ NUM_WORKERS = 8
 
 # Physics Constants
 MAX_SPEED = 12.0
-FRICTION = 0.98
+FRICTION = 0.99
 REPULSE_FORCE = 1200.0
 ATTRACT_FORCE = 40.0
 
@@ -72,6 +72,11 @@ def worker_logic(start_idx, end_idx):
     dt = 0.01
 
     while running:
+        # Use global time to sync all worker pulses
+        t = time.perf_counter()
+        # Pulse goes from 0.7 to 1.3, three times per second
+        pulse = (np.sin(t * 3.0) * 0.3) + 1.0
+
         # 1. Distances
         dx = target[0] - pos_x
         dy = target[1] - pos_y
@@ -85,21 +90,22 @@ def worker_logic(start_idx, end_idx):
         inv_dist = 1.0 / dist
 
         # 2. Forces
-        # Create a pulsing "heartbeat" for the swarm
-        # We can use a simple sine wave based on time (passed in or estimated)
-        pulse = (np.sin(time.perf_counter() * 5.0) * 0.5 + 1.0)
 
         if is_repelling:
-            # Sudden explosion
-            force = -REPULSE_FORCE * (inv_dist ** 2.2) * 80.0
-
-            # Add "Turbulence": Randomize the direction slightly during explosion
-            # This makes the blast look "dirty" and chaotic rather than a perfect circle
-            ax = (dx * force) + np.random.uniform(-5, 5, len(dx))
-            ay = (dy * force) + np.random.uniform(-5, 5, len(dy))
+            # Shockwave: violent and chaotic
+            force = -REPULSE_FORCE * (inv_dist ** 2.8) * 150.0
+            ax = (dx * force + np.random.uniform(-15, 15, len(dx))) / my_props[:, 0]
+            ay = (dy * force + np.random.uniform(-15, 15, len(dy))) / my_props[:, 0]
         else:
-            # Pulse the attraction so the swarm "breathes"
+            # RIVER: Apply the pulse here!
             force = (ATTRACT_FORCE * pulse) * inv_dist
+            ax = (dx * force) / my_props[:, 0]
+            ay = (dy * force) / my_props[:, 0]
+
+            # Swirl (Keep this steady for flow)
+            swirl_mag = 18.0 * inv_dist
+            ax -= (dy * swirl_mag) / my_props[:, 0]
+            ay += (dx * swirl_mag) / my_props[:, 0]
 
         # Re-introduce mass as a divisor for acceleration
         ax = (dx * force) / my_props[:, 0]
@@ -160,9 +166,9 @@ vertex_shader = '''
     layout (location = 0) in vec2 in_vert;
     layout (location = 1) in vec4 in_inst;
     layout (location = 2) in vec2 in_energy;
-
+    
     out float v_energy;
-
+    
     void main() {
         vec2 pos = in_inst.xy;
         vec2 vel = in_inst.zw;
@@ -171,14 +177,18 @@ vertex_shader = '''
     
         float angle = atan(vel.y, vel.x) - 1.5708;
         
-        // STRETCH: Triangles get longer as they go faster
-        float stretch = 1.0 + (speed * 0.1);
-        
-        // Scale matrix with stretch on the Y axis (local to the triangle)
-        mat2 rot = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+        // EXCITING: Velocity Stretching
+        // Fast triangles become long needles (1.0 base + 0.15 * speed)
+        float stretch = 1.0 + (speed * 0.15);
         vec2 stretched_vert = in_vert * vec2(1.0, stretch);
     
-        gl_Position = vec4((rot * stretched_vert * (0.8 + v_energy)) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
+        float c = cos(angle);
+        float s = sin(angle);
+        mat2 rot = mat2(c, s, -s, c);
+    
+        // Scale also grows slightly with energy
+        float size_scale = 0.8 + (v_energy * 0.5);
+        gl_Position = vec4((rot * stretched_vert * size_scale) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
     }
 '''
 
@@ -187,11 +197,11 @@ fragment_shader = '''
     in float v_energy;
     layout (location = 0) out vec4 out_color;
     void main() {
-        // Squaring v_energy makes the transition from blue to orange "snappier"
-        float e = pow(v_energy, 2.2); 
+        // Non-linear energy ramp (power of 2.5) makes the "hot" states punchier
+        float e = pow(v_energy, 2.5);
         
-        vec3 cold = vec3(0.05, 0.1, 0.4);
-        vec3 hot = vec3(1.5, 0.8, 0.3); // Values > 1.0 make it feel "incandescent"
+        vec3 cold = vec3(0.08, 0.15, 0.4);   // Deep Neon Blue
+        vec3 hot = vec3(1.8, 0.9, 0.3);    // Incandescent Orange (Overdrive > 1.0)
         
         vec3 color = mix(cold, hot, e);
         out_color = vec4(color, 1.0);
