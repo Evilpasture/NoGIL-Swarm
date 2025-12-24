@@ -10,7 +10,7 @@ This project requires Python 3.14+ (Free-Threaded build) to demonstrate the remo
 
 Open your terminal and follow.
 
-Assuming you have Python Install Manager, and **NOT** the old Python Launcher,
+Assuming you have Python Install Manager working, and **NOT** the old Python Launcher,
 
 ```bash
 py install 3.14t
@@ -24,6 +24,7 @@ py --list
 ```bash
 pip install zengl glfw numpy
 ```
+There wouldn't be any dependency problems with these in 3.14.2t.
 ### Run with GIL Disabled: 
 To unlock the 6 physics worker threads, you **MUST** use the -X gil=0 flag:
 ```bash
@@ -39,8 +40,11 @@ Note: If you run this on a standard (non-t) Python build, the simulation will st
 
 * High-Frequency Physics: 6 dedicated worker threads running independent Euler integration at ~200Hz.
 
-* Zero-Copy GPU Pipeline: Leverages ZenGL for hardware-accelerated instancing of 2,000+ entities with a single draw call.
+* Zero-Copy GPU Pipeline: Leverages ZenGL for hardware-accelerated instancing of 200,000+ entities with a single draw call.
 
 * Non-Linear Vector Fields: Real-time switching between tangential vortex (Whirlpool) and radial inverse-distance forces (Shockwave).
 
-Perhaps Python will finally be used in rendering? God knows. All I know is that I wrestled with the pipeline of ZenGL, and I had to use ZenGL as my first renderer.
+Perhaps Python will finally be used in rendering? 
+God knows. All I know is that I wrestled with the pipeline of ZenGL, and I had to use ZenGL as my first renderer.
+One day I just decided I wanted to learn rendering but using the 3.14.2t, discovered the only working renderer that is ZenGL,
+suffering with the first static triangle. But guess what? It worked. And I'm proud of myself.
