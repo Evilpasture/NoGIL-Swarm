@@ -314,7 +314,7 @@ class Renderer:
             vertex_count=3
         )
 
-    def draw(self, player_x, player_y):
+    def draw(self, player_x, player_y, dt):  # <--- Note the 'dt' argument
         self.ctx.new_frame()
         self.image.clear()
         self.depth.clear()
@@ -322,8 +322,13 @@ class Renderer:
         aspect = WINDOW_SIZE[0] / WINDOW_SIZE[1]
         proj = get_perspective(45.0, aspect, 0.1, 100.0)
 
-        self.cam_x += (player_x - self.cam_x) * 0.1
-        self.cam_y += (player_y - self.cam_y) * 0.1
+        # --- FIX: Time-Independent Camera Smoothing ---
+        # This formula keeps the "0.1" feel at 60FPS, but adjusts for lag/high-fps
+        # If dt is high (lag), the camera moves further to catch up.
+        smooth_factor = 1.0 - 0.1 ** (dt * 60.0)
+
+        self.cam_x += (player_x - self.cam_x) * smooth_factor
+        self.cam_y += (player_y - self.cam_y) * smooth_factor
 
         view = get_lookat(
             np.array([self.cam_x, self.cam_y + 4.0, 6.0], dtype='f4'),
@@ -342,28 +347,19 @@ class Renderer:
             m = get_model_matrix(p.x, p.y, 0.0, p.hw * 2, p.hh * 2, 1.0)
             render_obj(m, (0.2, 0.8, 0.3))
 
-        # Draw a dark "Abyss Floor" way below
         floor_m = get_model_matrix(player_x, -15.0, -10.0, 100.0, 1.0, 100.0)
-        render_obj(floor_m, (0.05, 0.05, 0.1))  # Dark Blue floor
+        render_obj(floor_m, (0.05, 0.05, 0.1))
 
-        # Calculate target tilt based on velocity (approximated by position diff)
-        # If player is to the right of camera, tilt right, etc.
+        # Tilt also needs time correction to be perfectly smooth
         target_tilt = -(player_x - self.cam_x) * 1.5
+        self.tilt_angle += (target_tilt - self.tilt_angle) * smooth_factor
 
-        # Smooth the tilt (Lerp)
-        self.tilt_angle += (target_tilt - self.tilt_angle) * 0.1
-
-        # 1. Scale
         s = np.diag([0.2, 0.2, 0.2, 1.0]).astype('f4')
-        # 2. Rotate (Z-axis tilt)
         r = get_rotation_z(self.tilt_angle)
-        # 3. Translate
         t = np.eye(4, dtype='f4')
         t[0:3, 3] = [player_x, player_y, 0.0]
 
-        # Model = T * R * S
         m_p = t @ r @ s
-
         render_obj(m_p, (1.0, 0.5, 0.0))
 
         for i in range(physics.max_particles):
@@ -372,7 +368,6 @@ class Renderer:
                 s = life * 0.08
                 pos = physics.p_pos[i]
                 m_part = get_model_matrix(pos[0], pos[1], pos[2], s, s, s)
-                # Use a grayish-white for dust, fading with life
                 render_obj(m_part, (0.7 * life, 0.7 * life, 0.8 * life))
 
         self.pipeline_2d.render()
@@ -411,16 +406,47 @@ if __name__ == "__main__":
 
     glfw.set_key_callback(window, on_key)
 
+    TARGET_FPS = 60.0
+    FIXED_DT = 1.0 / TARGET_FPS
+    SUB_STEPS = 8
+    PHYSICS_DT = FIXED_DT / SUB_STEPS
+
+    accumulator = 0.0
     last_time = time.perf_counter()
+
+    # Initialize positions
+    px, py = physics.player_data[0], physics.player_data[1]
+    prev_px, prev_py = px, py
+
     while not glfw.window_should_close(window):
-        # Fixed time step logic
-        sub_steps = 8  # Higher is smoother physics
-        dt = 0.0166 / sub_steps  # Assuming 60 FPS target (16.6ms)
+        current_time = time.perf_counter()
+        frame_time = current_time - last_time
+        last_time = current_time
 
-        for _ in range(sub_steps):
-            px, py = physics.step(dt)
+        # Prevent death spiral
+        if frame_time > 0.25:
+            frame_time = 0.25
 
-        renderer.draw(px, py)
+        accumulator += frame_time
+
+        while accumulator >= FIXED_DT:
+            prev_px, prev_py = px, py
+
+            for _ in range(SUB_STEPS):
+                px, py = physics.step(PHYSICS_DT)
+
+            accumulator -= FIXED_DT
+
+        # Calculate Alpha and CLAMP it (Fixes floating point floating-over errors)
+        alpha = accumulator / FIXED_DT
+        alpha = max(0.0, min(1.0, alpha))
+
+        render_x = prev_px * (1.0 - alpha) + px * alpha
+        render_y = prev_py * (1.0 - alpha) + py * alpha
+
+        # --- PASS frame_time HERE ---
+        renderer.draw(render_x, render_y, frame_time)
+
         glfw.swap_buffers(window)
         glfw.poll_events()
 
