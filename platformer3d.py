@@ -49,6 +49,13 @@ class Platform:
     hw: float
     hh: float
 
+@dataclass
+class Particle:
+    x: float; y: float; z: float
+    vx: float; vy: float; vz: float
+    life: float  # Starts at 1.0, disappears at 0.0
+    color: tuple
+
 
 # --- 2. MATH (Verified) ---
 def get_perspective(fovy_deg, aspect, near, far):
@@ -81,11 +88,11 @@ def get_lookat(eye, target, up):
 
 def get_model_matrix(x, y, z, sx, sy, sz):
     m = np.eye(4, dtype='f4')
-    m[0, 0] = sx;
-    m[1, 1] = sy;
+    m[0, 0] = sx
+    m[1, 1] = sy
     m[2, 2] = sz
-    m[0, 3] = x;
-    m[1, 3] = y;
+    m[0, 3] = x
+    m[1, 3] = y
     m[2, 3] = z
     return m
 
@@ -115,6 +122,18 @@ class PhysicsEngine:
                 for cy in range(min_cy, max_cy + 1):
                     self.grid[(cx, cy)].append(p)
 
+        self.particles = []
+
+    def spawn_burst(self, x, y, color, count=10):
+        for _ in range(count):
+            self.particles.append(Particle(
+                x, y, 0.0,
+                np.random.uniform(-0.05, 0.05),  # vx
+                np.random.uniform(0.01, 0.1),  # vy
+                np.random.uniform(-0.05, 0.05),  # vz
+                1.0, color
+            ))
+
     def step(self, dt):
         px, py, vx, vy = self.player_data
         vy += -0.4 * dt
@@ -123,6 +142,9 @@ class PhysicsEngine:
         if self.keys.get(glfw.KEY_RIGHT): vx += 0.005
         new_x, new_y = px + vx, py + vy
         on_ground = False
+        if self.keys.get(glfw.KEY_UP) and on_ground:
+            vy = 0.15
+            self.spawn_burst(px, py - 0.1, (1.0, 1.0, 1.0), 15)  # White "poof" on jump
         cx, cy = int(new_x // self.cell_size), int(new_y // self.cell_size)
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -139,6 +161,20 @@ class PhysicsEngine:
         if self.keys.get(glfw.KEY_UP) and on_ground: vy = 0.15
         if new_y < -5.0: new_x, new_y, vx, vy = 0.0, 2.0, 0.0, 0.0
         self.player_data[:] = [new_x, new_y, vx, vy]
+
+        for p in self.particles[:]:
+            p.x += p.vx
+            p.y += p.vy
+            p.z += p.vz
+            p.vy -= 0.2 * dt  # gravity
+            p.life -= 1.5 * dt
+            if p.life <= 0:
+                self.particles.remove(p)
+
+            # Spawn "dust" if moving fast on ground
+        if abs(vx) > 0.01 and on_ground:
+            self.spawn_burst(px, py - 0.1, (0.5, 0.5, 0.5), 1)
+
         return new_x, new_y
 
 
@@ -281,6 +317,15 @@ class Renderer:
         m_p = t @ r @ s
 
         render_obj(m_p, (1.0, 0.5, 0.0))
+
+        for p in physics.particles:
+            # Scale based on remaining life
+            s_val = 0.05 * p.life
+            m_part = get_model_matrix(p.x, p.y, p.z, s_val, s_val, s_val)
+
+            # Fade color based on life
+            p_color = (p.color[0] * p.life, p.color[1] * p.life, p.color[2] * p.life)
+            render_obj(m_part, p_color)
 
         self.pipeline_2d.render()
         self.image.blit()
