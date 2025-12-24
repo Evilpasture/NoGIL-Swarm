@@ -163,24 +163,33 @@ class Renderer:
         self.u_color = self.pipeline.uniforms['color']
         self.u_camera = self.pipeline.uniforms['camera']
 
+        self.stars = [
+            (np.random.uniform(-5, 5), np.random.uniform(-0.5, 0.5), 0.01, 0.01)
+            for _ in range(50)
+        ]
+
     def draw(self, player_pos):
         self.ctx.new_frame()
         self.image.clear()
 
-        # Update camera to follow player (Lerp for smoothness if desired)
-        # We only follow X here, but you can follow Y too.
-        self.u_camera[:] = struct.pack('2f', player_pos[0], 0.0)
+        # --- LAYER 1: The Distant Stars (Slow Movement) ---
+        self.u_camera[:] = struct.pack('2f', player_pos[0] * 0.2, 0.0)  # 20% speed
+        self.u_color[:] = struct.pack('3f', 0.2, 0.2, 0.4)  # Dim Blue
 
-        # Platforms (Rendered relative to camera)
-        self.u_color[:] = struct.pack('3f', 0.4, 0.4, 0.4)
-        for p in self.platforms:
-            self.u_trans[:] = struct.pack(
-                '4f',
-                p.x, p.y, p.hw, p.hh
-            )
+        for sx, sy, sw, sh in self.stars:
+            self.u_trans[:] = struct.pack('4f', sx, sy, sw, sh)
             self.pipeline.render()
 
-        # Player (Will appear centered because camera = player_pos)
+        # --- LAYER 2: The Game World (Normal Speed) ---
+        self.u_camera[:] = struct.pack('2f', player_pos[0], 0.0)  # 100% speed
+
+        # Render Platforms...
+        self.u_color[:] = struct.pack('3f', 0.4, 0.4, 0.4)
+        for p in self.platforms:
+            self.u_trans[:] = struct.pack('4f', p.x, p.y, p.hw, p.hh)
+            self.pipeline.render()
+
+        # Render Player...
         self.u_color[:] = struct.pack('3f', 1.0, 0.8, 0.2)
         self.u_trans[:] = struct.pack('4f', player_pos[0], player_pos[1], 0.05, 0.05)
         self.pipeline.render()
