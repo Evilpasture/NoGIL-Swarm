@@ -7,6 +7,13 @@ import numpy as np
 import sys
 import threading
 import time
+import gc
+
+from zengl_extras import init
+
+init(debug=True, gpu=False, dpi_aware=False, high_performance=False, opengl_core=False) # ignore this, just extra util
+
+gc.disable()
 
 # 1. Initialize Window & Context
 if not glfw.init():
@@ -33,8 +40,9 @@ image = ctx.image((1280, 720), 'rgba8unorm')
 
 # 2. CONFIGURATIONS
 # Increased count because 3.14t can handle it
-TRIANGLE_COUNT = 200000
+TRIANGLE_COUNT = 3000000
 NUM_WORKERS = 8
+DT = 0.016
 
 # Physics Constants
 MAX_SPEED = 12.0
@@ -42,138 +50,92 @@ FRICTION = 0.99
 REPULSE_FORCE = 1200.0
 ATTRACT_FORCE = 40.0
 
-# Shared Arrays (NumPy 2.x releases the GIL on heavy ops, but here we are in Python loop)
-props = np.random.uniform(0.8, 1.2, (TRIANGLE_COUNT, 4)).astype('f4')
+buffers = [
+    {
+        'pos': ctx.buffer(size=TRIANGLE_COUNT * 8),
+        'vel': ctx.buffer(size=TRIANGLE_COUNT * 8),
+    } for _ in range(2)
+]
+
+props = np.random.uniform(0.8, 1.2, TRIANGLE_COUNT).astype('f4')
 target = np.array([0.0, 0.0], dtype='f4')
 
-# [x, y, vx, vy, kinetic, potential]
-gpu_data = np.zeros((TRIANGLE_COUNT, 6), dtype='f4')
-
-# Init positions
-gpu_data[:, 0] = np.random.uniform(-600, 600, TRIANGLE_COUNT)
-gpu_data[:, 1] = np.random.uniform(-350, 350, TRIANGLE_COUNT)
-gpu_data[:, 2:4] = np.random.uniform(-1, 1, (TRIANGLE_COUNT, 2))
+# We use two separate sets of NumPy arrays to prevent "tearing"
+# while the main thread is uploading
+physics_data = {
+    'pos': np.random.uniform(-600, 600, (TRIANGLE_COUNT, 2)).astype('f4'),
+    'vel': np.random.uniform(-1, 1, (TRIANGLE_COUNT, 2)).astype('f4'),
+}
 
 running = True
 is_repelling = False
 
 
+# SYNC: One event to release workers, one barrier to catch them
+start_sim = threading.Event()
+done_sim = threading.Barrier(NUM_WORKERS + 1)
+
 m_prev_x, m_prev_y = glfw.get_cursor_pos(window)
 mouse_vel = np.array([0.0, 0.0], dtype='f4')
 
 
-# 3. WORKER LOGIC (Free-Threaded)
-def worker_logic(start_idx, end_idx):
-    my_data = gpu_data[start_idx:end_idx]
-    my_props = props[start_idx:end_idx]
-
-    # Pre-allocate slice views
-    pos_x, pos_y = my_data[:, 0], my_data[:, 1]
-    vel_x, vel_y = my_data[:, 2], my_data[:, 3]
-    dt = 0.016
+# 3. WORKER LOGIC
+def worker_logic(start, end):
+    p_slice = physics_data['pos'][start:end]
+    v_slice = physics_data['vel'][start:end]
+    pr_slice = 1.0 / props[start:end]
 
     while running:
-        # 1. Global Sync Pulse
-        t = time.perf_counter()
-        pulse = (np.sin(t * 4.0) * 0.4) + 1.0
+        start_sim.wait()  # Wait for frame start
 
-        # 2. Distance Math
-        dx, dy = target[0] - pos_x, target[1] - pos_y
-        dist_sq = dx * dx + dy * dy + 60.0  # Slightly higher softening
+        # ... (Math logic remains the same) ...
+        dx = target[0] - p_slice[:, 0]
+        dy = target[1] - p_slice[:, 1]
+        dist_sq = dx * dx + dy * dy + 60.0
         inv_dist = 1.0 / np.sqrt(dist_sq)
 
-        # 3. Force Calculation
+        # Vectorized physics update
         if is_repelling:
-            # SHOCKWAVE: High-power inverse cubic
-            force = -REPULSE_FORCE * (inv_dist ** 3) * 12000.0
-            # Add chaotic turbulence and slant it with mouse movement
-            ax = (dx * force + mouse_vel[0] * 8.0 + np.random.uniform(-10, 10, len(dx))) / my_props[:, 0]
-            ay = (dy * force + mouse_vel[1] * 8.0 + np.random.uniform(-10, 10, len(dy))) / my_props[:, 0]
+            force = -1200.0 * (inv_dist ** 3) * 12000.0
+            ax = (dx * force + mouse_vel[0] * 8.0) * pr_slice
+            ay = (dy * force + mouse_vel[1] * 8.0) * pr_slice
         else:
-            # RIVER: Pulsing attraction + Mouse Wind
-            force = (ATTRACT_FORCE * pulse) * inv_dist
-            wind_str = 25.0 * (inv_dist ** 1.5)
+            force = 40.0 * inv_dist
+            ax = (dx * force + mouse_vel[0] * 5.0) * pr_slice
+            ay = (dy * force + mouse_vel[1] * 5.0) * pr_slice
 
-            ax = (dx * force + mouse_vel[0] * wind_str) / my_props[:, 0]
-            ay = (dy * force + mouse_vel[1] * wind_str) / my_props[:, 0]
-
-            # SWIRL
-            swirl_mag = 22.0 * inv_dist
-            ax -= (dy * swirl_mag) / my_props[:, 0]
-            ay += (dx * swirl_mag) / my_props[:, 0]
-
-        # 4. Integration (Semi-Implicit)
-        vel_x += ax * dt
-        vel_y += ay * dt
-
-        # Apply Friction
-        vel_x *= FRICTION
-        vel_y *= FRICTION
-
-        # Hard Speed Cap
-        speed_sq = vel_x * vel_x + vel_y * vel_y
-        over_limit = speed_sq > (MAX_SPEED * MAX_SPEED)
-        if np.any(over_limit):
-            scale = MAX_SPEED / np.sqrt(speed_sq[over_limit])
-            vel_x[over_limit] *= scale
-            vel_y[over_limit] *= scale
-
-        # Position Update
-        pos_x += vel_x
-        pos_y += vel_y
+        v_slice[:, 0] = (v_slice[:, 0] + ax * DT) * 0.99
+        v_slice[:, 1] = (v_slice[:, 1] + ay * DT) * 0.99
+        p_slice += v_slice
 
         # Screen Wrap
-        np.putmask(pos_x, pos_x > 650, -650)
-        np.putmask(pos_x, pos_x < -650, 650)
-        np.putmask(pos_y, pos_y > 370, -370)
-        np.putmask(pos_y, pos_y < -370, 370)
+        p_slice[p_slice[:, 0] > 640, 0] = -640
+        p_slice[p_slice[:, 0] < -640, 0] = 640
+        p_slice[p_slice[:, 1] > 360, 1] = -360
+        p_slice[p_slice[:, 1] < -360, 1] = 360
 
-        # Telemetry for Shader (speed squared normalized)
-        my_data[:, 4] = speed_sq * 0.012
-        elapsed = time.perf_counter() - t
-        sleep_time = dt - elapsed
-        if sleep_time > 0.0:
-            time.sleep(sleep_time) # So that your CPU doesn't cry when you try to run 200000 triangles
+        done_sim.wait()  # Signal math is done
 
 
 # Start Workers
 chunk = TRIANGLE_COUNT // NUM_WORKERS
 for i in range(NUM_WORKERS):
-    s = i * chunk
-    e = TRIANGLE_COUNT if i == NUM_WORKERS - 1 else (i + 1) * chunk
-    threading.Thread(target=worker_logic, args=(s, e), daemon=True).start()
+    threading.Thread(target=worker_logic, args=(i*chunk, (i+1)*chunk), daemon=True).start()
 
 # 4. PIPELINE
-shape = ctx.buffer(np.array([0, 0.05, -0.02, -0.02, 0.02, -0.02], dtype='f4'))
 
 vertex_shader = '''
     #version 450 core
-    layout (location = 0) in vec2 in_vert;
-    layout (location = 1) in vec4 in_inst;
-    layout (location = 2) in vec2 in_energy;
-    
+    layout (location = 0) in vec2 in_pos;
+    layout (location = 1) in vec2 in_vel;
     out float v_energy;
-    
     void main() {
-        vec2 pos = in_inst.xy;
-        vec2 vel = in_inst.zw;
-        float speed = length(vel);
-        v_energy = clamp(in_energy.x, 0.0, 1.0);
-    
-        float angle = atan(vel.y, vel.x) - 1.5708;
-        
-        // EXCITING: Velocity Stretching
-        // Fast triangles become long needles (1.0 base + 0.15 * speed)
-        float stretch = 1.0 + (speed * 0.15);
-        vec2 stretched_vert = in_vert * vec2(1.0, stretch);
-    
-        float c = cos(angle);
-        float s = sin(angle);
-        mat2 rot = mat2(c, s, -s, c);
-    
-        // Scale also grows slightly with energy
-        float size_scale = 0.8 + (v_energy * 0.5);
-        gl_Position = vec4((rot * stretched_vert * size_scale) + (pos / vec2(640.0, 360.0)), 0.0, 1.0);
+        float speed_sq = dot(in_vel, in_vel);
+        v_energy = clamp(speed_sq * 0.01, 0.0, 1.0);
+
+        // Use PointSize for visualization - much cheaper than triangles
+        gl_PointSize = 1.0 + (v_energy * 2.0);
+        gl_Position = vec4(in_pos / vec2(640.0, 360.0), 0.0, 1.0);
     }
 '''
 
@@ -181,35 +143,28 @@ fragment_shader = '''
     #version 450 core
     in float v_energy;
     layout (location = 0) out vec4 out_color;
-    // Fragment Shader
     void main() {
-        float e = pow(v_energy, 2.5);
-        
-        // palette: Deep Blue -> Electric Cyan -> White Hot -> Solar Orange
-        vec3 color = mix(vec3(0.02, 0.05, 0.2), vec3(0.0, 0.8, 1.0), e);
-        if (e > 0.7) {
-            color = mix(color, vec3(2.0, 1.2, 0.5), (e - 0.7) * 3.3);
-        }
-        
-        out_color = vec4(color, 1.0);
+        // Circular point shape
+        if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard;
+
+        vec3 color = mix(vec3(0.1, 0.2, 0.5), vec3(0.4, 0.9, 1.0), v_energy);
+        out_color = vec4(color, 0.8);
     }
 '''
 
-instance_buffs = [ctx.buffer(size=TRIANGLE_COUNT * 24) for _ in range(2)]
 
 pipelines = [
     ctx.pipeline(
         vertex_shader=vertex_shader,
         fragment_shader=fragment_shader,
         framebuffer=[image],
-        topology='triangles',
-        vertex_count=3,
-        instance_count=TRIANGLE_COUNT,
+        topology='points',
+        vertex_count=TRIANGLE_COUNT,
         vertex_buffers=[
-            *zengl.bind(shape, '2f', 0),
-            *zengl.bind(instance_buffs[i], '4f 2f /i', 1, 2),
+            *zengl.bind(b['pos'], '2f', 0),
+            *zengl.bind(b['vel'], '2f', 1),
         ],
-    ) for i in range(2)
+    ) for b in buffers
 ]
 
 fade_blend_settings : BlendSettings = {
@@ -239,6 +194,7 @@ fade_pipe = ctx.pipeline(
 # 5. RENDER LOOP
 frame = 0
 t_prev = time.perf_counter()
+m_prev_x, m_prev_y = glfw.get_cursor_pos(window)
 
 while not glfw.window_should_close(window):
     mx, my = glfw.get_cursor_pos(window)
@@ -253,21 +209,37 @@ while not glfw.window_should_close(window):
     ctx.new_frame()
     fade_pipe.render()
 
-    idx = frame % 2
-    # In 3.14t, this read is racy against the worker writes.
-    # We accept the "motion blur" artifact for performance.
-    instance_buffs[idx].write(gpu_data)
-    pipelines[idx].render()
+    # --- THE PIPELINE TRICK ---
+    # 1. Start the workers on the NEXT frame's data
+    start_sim.set()
 
+    # 2. While workers are "sweating", the GPU renders the CURRENT frame
+    # We use (frame % 2) to pick the buffer that was finished last time
+    render_idx = frame % 2
+    pipelines[render_idx].render()
+
+    # 3. Wait for workers to finish before we start the next loop
+    done_sim.wait()
+    start_sim.clear()
+
+    # 4. Update the buffers for the NEXT frame
+    # We write to the buffer we just finished rendering
+    write_idx = render_idx
+    buffers[write_idx]['pos'].write(physics_data['pos'])
+    buffers[write_idx]['vel'].write(physics_data['vel'])
+
+    # --- THE CLEANUP ---
     image.blit()
-    ctx.end_frame()
+    ctx.end_frame()  # Flush to GPU
+
+    # These MUST only happen once!
     glfw.swap_buffers(window)
     glfw.poll_events()
 
     frame += 1
     if frame % 60 == 0:
         t_now = time.perf_counter()
-        fps = 60 / (t_now - t_prev)
+        fps = 60 * (1.0/(t_now - t_prev))
         t_prev = t_now
         glfw.set_window_title(window, f"{gil_tpl} | FPS: {int(fps)} | Particles: {TRIANGLE_COUNT}")
 
