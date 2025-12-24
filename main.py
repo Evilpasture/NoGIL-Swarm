@@ -70,7 +70,7 @@ def worker_logic(start_idx, end_idx):
     # Pre-allocate slice views
     pos_x, pos_y = my_data[:, 0], my_data[:, 1]
     vel_x, vel_y = my_data[:, 2], my_data[:, 3]
-    dt = 0.01
+    dt = 0.016
 
     while running:
         # 1. Global Sync Pulse
@@ -130,6 +130,10 @@ def worker_logic(start_idx, end_idx):
 
         # Telemetry for Shader (speed squared normalized)
         my_data[:, 4] = speed_sq * 0.012
+        elapsed = time.perf_counter() - t
+        sleep_time = dt - elapsed
+        if sleep_time > 0.0:
+            time.sleep(sleep_time) # So that your CPU doesn't cry when you try to run 200000 triangles
 
 
 # Start Workers
