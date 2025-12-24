@@ -25,14 +25,29 @@ class PhysicsEngine:
         self.keys = {}
         self.running = True
 
+        # SPATIAL GRID SETUP
+        self.cell_size = 0.5
+        self.grid = defaultdict(list)
+        self._build_grid()
+
+    def _build_grid(self):
+        for p in self.platforms:
+            min_cx = int((p.x - p.hw) // self.cell_size)
+            max_cx = int((p.x + p.hw) // self.cell_size)
+            min_cy = int((p.y - p.hh) // self.cell_size)
+            max_cy = int((p.y + p.hh) // self.cell_size)
+
+            for cx in range(min_cx, max_cx + 1):
+                for cy in range(min_cy, max_cy + 1):
+                    self.grid[(cx, cy)].append(p)
+
     def step_physics(self, dt):
-        """Helper to contain the actual math, making it independent of loop speed"""
+        """Now called with a FIXED dt (e.g., 0.01) every time"""
         px, py, vx, vy = self.player_data
 
-        # 1. Scale constants for 'Per-Second' logic
-        # Gravity is now roughly -2.2 units per second squared
-        gravity = -0.22 # don't put this too strong
-        friction = 0.85 ** (dt * 100)
+        gravity = -0.22
+        # Friction is now constant because dt is constant!
+        friction = 0.85
 
         vy += gravity * dt
         vx *= friction
@@ -43,71 +58,52 @@ class PhysicsEngine:
         new_x, new_y = px + vx, py + vy
         on_ground = False
 
-        # GRID STUFF (might need fix, because smelly)
+        cx, cy = int(new_x // self.cell_size), int(new_y // self.cell_size)
 
-        cell_size = 0.5
+        # Use a simple list for speed; the duplicate checks in collision are cheap
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for plat in self.grid.get((cx + dx, cy + dy), []):
+                    rx, ry, rw, rh = plat.x, plat.y, plat.hw, plat.hh
 
-        grid = defaultdict(list)
-
-        def cell(x):
-            return int(x // cell_size)
-
-        for p in self.platforms:
-            min_cx = cell(p.x - p.hw)
-            max_cx = cell(p.x + p.hw)
-            min_cy = cell(p.y - p.hh)
-            max_cy = cell(p.y + p.hh)
-
-            for cx in range(min_cx, max_cx + 1):
-                for cy in range(min_cy, max_cy + 1):
-                    grid[(cx, cy)].append(p)
-
-            px, py = new_x, new_y
-            cx, cy = cell(px), cell(py)
-
-            candidates = []
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    candidates.extend(grid.get((cx + dx, cy + dy), []))
-
-        # PYTHON FOR LOOP!!! O(n) is where all engines die in a ditch. Trying to find alternatives.
-        for plat in candidates:
-            rx, ry, rw, rh = plat.x, plat.y, plat.hw, plat.hh
-
-            if (abs(new_x - rx) < (rw + self.pw)) and (abs(new_y - ry) < (rh + self.ph)):
-                # Landing/Ceiling
-                if abs(px - rx) < (rw + self.pw - 0.02):
-                    if vy < 0 and py >= (ry + rh - 0.02):
-                        new_y, vy, on_ground = ry + rh + self.ph, 0, True
-                    elif vy > 0 and py <= (ry - rh + 0.02):
-                        new_y, vy = ry - rh - self.ph, 0
-                # Walls
-                elif abs(py - ry) < (rh + self.ph - 0.02):
-                    new_x, vx = (rx - rw - self.pw if vx > 0 else rx + rw + self.pw), 0
+                    if (abs(new_x - rx) < (rw + self.pw)) and (abs(new_y - ry) < (rh + self.ph)):
+                        if abs(px - rx) < (rw + self.pw - 0.02):
+                            if vy < 0 and py >= (ry + rh - 0.02):
+                                new_y, vy, on_ground = ry + rh + self.ph, 0, True
+                            elif vy > 0 and py <= (ry - rh + 0.02):
+                                new_y, vy = ry - rh - self.ph, 0
+                        elif abs(py - ry) < (rh + self.ph - 0.02):
+                            new_x, vx = (rx - rw - self.pw if vx > 0 else rx + rw + self.pw), 0
 
         if self.keys.get(glfw.KEY_UP) and on_ground:
-            vy = 0.045  # Back to your original perfect jump value
+            vy = 0.045
 
         self.player_data[:] = [new_x, new_y, vx, vy]
 
     def update(self):
-        """The Loop: Manages time and calls step_physics"""
-        target_dt = 1.0 / 100.0  # 100Hz Physics
+        """The Accumulator Loop: Decouples rendering and CPU speed from physics"""
+        fixed_dt = 1.0 / 100.0  # 10ms steps
+        accumulator = 0.0
         last_time = time.perf_counter()
-        while self.running:
-            elapsed = time.perf_counter() - last_time
-            sleep_time = target_dt - elapsed
-            if sleep_time > 0.0:
-                time.sleep(sleep_time)
 
+        while self.running:
             now = time.perf_counter()
-            dt = now - last_time
+            frame_time = now - last_time
             last_time = now
 
-            # This ensures that even if the thread sleeps longer,
-            # the player doesn't move 50x faster than intended.
-            self.step_physics(dt)
+            # Avoid the 'Spiral of Death' (cap the max frame time)
+            if frame_time > 0.25:
+                frame_time = 0.25
 
+            accumulator += frame_time
+
+            # Consume the accumulator in fixed chunks
+            while accumulator >= fixed_dt:
+                self.step_physics(fixed_dt)
+                accumulator -= fixed_dt
+
+            # Yield to OS - helps No-GIL threads breathe
+            time.sleep(0.001)
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
