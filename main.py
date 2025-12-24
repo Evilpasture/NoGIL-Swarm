@@ -44,12 +44,6 @@ TRIANGLE_COUNT = 3000000
 NUM_WORKERS = 8
 DT = 0.016
 
-# Physics Constants
-MAX_SPEED = 12.0
-FRICTION = 0.99
-REPULSE_FORCE = 1200.0
-ATTRACT_FORCE = 40.0
-
 buffers = [
     {
         'pos': ctx.buffer(size=TRIANGLE_COUNT * 8),
