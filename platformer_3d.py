@@ -3,13 +3,19 @@ import zengl
 import numpy as np
 import struct
 import time
+import sys
 from dataclasses import dataclass
+
+# verify
+is_free_threaded = hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled() == False
+GIL_STATE = "No GIL (True Parallelism)" if is_free_threaded else "GIL Active"
+print(f"Python {sys.version.split()[0]} | {GIL_STATE}")
 
 # --- Configuration ---
 WINDOW_SIZE = (1280, 720)
 MOUSE_SENSITIVITY = 0.003
 
-# --- 1. DATA: Standard Cube ---
+# --- 1. DATA ---
 cube_vertices = np.array([
     # Back face
     -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5,
@@ -39,7 +45,14 @@ class Platform:
     z: float
     hw: float
     hh: float
-    hd: float  # Half-width, Half-height, Half-depth
+    hd: float
+
+@dataclass
+class Particle:
+    x: float; y: float; z: float
+    vx: float; vy: float; vz: float
+    life: float  # Starts at 1.0, disappears at 0.0
+    color: tuple
 
 
 # --- 2. MATH ---
@@ -78,10 +91,9 @@ def get_model_matrix(x, y, z, sx, sy, sz):
     return m
 
 
-# --- 3. PHYSICS (NOW 3D) ---
+# --- 3. PHYSICS ---
 class PhysicsEngine:
     def __init__(self, platforms):
-        # x, y, z, vx, vy, vz
         self.player_data = np.array([0.0, 2.0, 0.0, 0.0, 0.0, 0.0], dtype='f4')
         self.platforms = platforms
         self.keys = {}
@@ -92,6 +104,27 @@ class PhysicsEngine:
         self.cam_yaw = -1.57
         self.cam_pitch = -0.3
 
+        # Particles
+        self.max_particles = 2000
+        self.p_pos = np.zeros((self.max_particles, 3), dtype='f4')
+        self.p_vel = np.zeros((self.max_particles, 3), dtype='f4')
+        self.p_life = np.zeros(self.max_particles, dtype='f4')
+        self.p_idx = 0
+
+    def spawn_burst(self, x, y, z, count, color=(0.8, 0.8, 0.8)):
+        for _ in range(count):
+            idx = self.p_idx % self.max_particles
+            self.p_pos[idx] = [x, y, z]
+
+            # Random velocity in all 3 directions
+            self.p_vel[idx] = [
+                np.random.uniform(-1.0, 1.0),
+                np.random.uniform(1.0, 3.0),
+                np.random.uniform(-1.0, 1.0)
+            ]
+            self.p_life[idx] = 1.0
+            self.p_idx += 1
+
     def step(self, dt):
         px, py, pz, vx, vy, vz = self.player_data
 
@@ -101,13 +134,13 @@ class PhysicsEngine:
         FRICTION = 10.0
         MAX_FALL_SPEED = -20.0
 
-        # --- 1. Forces ---
+        # Forces
         vy += GRAVITY * dt
         vy = max(vy, MAX_FALL_SPEED)
         vx -= vx * FRICTION * dt
         vz -= vz * FRICTION * dt
 
-        # --- 2. Input ---
+        # Input
         for_x, for_z = np.cos(self.cam_yaw), np.sin(self.cam_yaw)
         right_x, right_z = np.cos(self.cam_yaw + np.pi / 2), np.sin(self.cam_yaw + np.pi / 2)
 
@@ -123,15 +156,15 @@ class PhysicsEngine:
             vz += (acc_z / length) * MOVE_ACCEL * dt
 
         if self.keys.get(glfw.KEY_SPACE) and self.on_ground:
+            self.spawn_burst(px, py - 0.1, pz, 20, (1.0, 1.0, 1.0))
             vy = JUMP_FORCE
             self.on_ground = False
 
-        # --- 3. Collision ---
+        # --- Collision ---
 
         # X Axis
         px += vx * dt
         for plat in self.platforms:
-            # Pass 'vy' so we can disable stepping if we are jumping up
             if self.check_overlap(px, py, pz, plat, vy=vy, strict=False):
                 if px < plat.x:
                     px = plat.x - plat.hw - self.pw - 0.001
@@ -152,6 +185,11 @@ class PhysicsEngine:
         # Y Axis (Strict Mode)
         py += vy * dt
         self.on_ground = False
+
+        speed = np.sqrt(vx ** 2 + vz ** 2)
+        if speed > 0.5 and self.on_ground:
+            self.spawn_burst(px, py - 0.1, pz, 1, (0.4, 0.4, 0.4))
+
         for plat in self.platforms:
             if self.check_overlap(px, py, pz, plat, vy=vy, strict=True):
                 if vy < 0:  # Landing
@@ -168,10 +206,16 @@ class PhysicsEngine:
             vx, vy, vz = 0.0, 0.0, 0.0
 
         self.player_data[:] = [px, py, pz, vx, vy, vz]
+
+        active = self.p_life > 0
+        if np.any(active):
+            self.p_pos[active] += self.p_vel[active] * dt
+            self.p_vel[active, 1] += GRAVITY * dt  # Particles obey gravity
+            self.p_life[active] -= 2.0 * dt
+
         return px, py, pz
 
     def check_overlap(self, x, y, z, p, vy=0.0, strict=True):
-        # 1. Calculate Bounds
         p_min_x, p_max_x = x - self.pw, x + self.pw
         p_min_y, p_max_y = y - self.ph, y + self.ph
         p_min_z, p_max_z = z - self.pd, z + self.pd
@@ -180,24 +224,15 @@ class PhysicsEngine:
         plat_min_y, plat_max_y = p.y - p.hh, p.y + p.hh
         plat_min_z, plat_max_z = p.z - p.hd, p.z + p.hd
 
-        # 2. Basic Overlap Test
         if p_max_x <= plat_min_x or p_min_x >= plat_max_x: return False
         if p_max_y <= plat_min_y or p_min_y >= plat_max_y: return False
         if p_max_z <= plat_min_z or p_min_z >= plat_max_z: return False
 
-        if strict: return True
+        if strict or vy > 0: return True  # Walls are solid if jumping or doing Y-check
 
-        # 3. Step Logic (Prevents Tripping, Enables Auto-Step)
-
-        # CRITICAL FIX: If we are jumping UP (vy > 0), walls must be SOLID.
-        # This prevents the physics from snapping us to the bottom of the platform.
-        if vy > 0:
-            return True
-
-        # If we are falling or walking, allow stepping up small heights
-        step_allowance = 0.15
-        if p_min_y >= (plat_max_y - step_allowance):
-            return False  # Ignore the wall, let the Y-axis snap us up
+        # Step Allowance (Auto-climb small heights)
+        if p_min_y >= (plat_max_y - 0.15):
+            return False
 
         return True
 
@@ -209,7 +244,7 @@ class Renderer:
         self.platforms = platforms
         self.image = ctx.image(WINDOW_SIZE, 'rgba8unorm')
         self.depth = ctx.image(WINDOW_SIZE, 'depth24plus')
-        self.image.clear_value = (0.1, 0.1, 0.15, 1.0)  # Nicer sky color
+        self.image.clear_value = (0.1, 0.1, 0.15, 1.0)
 
         self.vbo = ctx.buffer(cube_vertices)
         self.pipeline_3d = ctx.pipeline(
@@ -262,7 +297,6 @@ class Renderer:
         aspect = WINDOW_SIZE[0] / WINDOW_SIZE[1]
         proj = get_perspective(60.0, aspect, 0.1, 100.0)
 
-        # --- 3D ORBIT CAMERA MATH ---
         dist = 6.0
         target_cam_x = px - np.cos(cam_yaw) * np.cos(cam_pitch) * dist
         target_cam_y = py - np.sin(cam_pitch) * dist + 1.0
@@ -276,7 +310,7 @@ class Renderer:
 
         view = get_lookat(
             np.array([self.cam_x, self.cam_y, self.cam_z], dtype='f4'),
-            np.array([px, py + 0.5, pz], dtype='f4'),  # Look slightly above player
+            np.array([px, py + 0.5, pz], dtype='f4'),
             np.array([0.0, 1.0, 0.0], dtype='f4')
         )
 
@@ -287,17 +321,22 @@ class Renderer:
             self.pipeline_3d.uniforms['color'][:] = struct.pack('3f', *color)
             self.pipeline_3d.render()
 
-        # Render Platforms
         for p in self.platforms:
             m = get_model_matrix(p.x, p.y, p.z, p.hw * 2, p.hh * 2, p.hd * 2)
             render_obj(m, (0.3, 0.7, 0.4))
 
-        # Render Player
         m_p = get_model_matrix(px, py, pz, 0.4, 0.4, 0.4)
         render_obj(m_p, (1.0, 0.5, 0.0))
 
-        self.image.blit()
+        for i in range(physics.max_particles):
+            life = physics.p_life[i]
+            if life > 0:
+                s = life * 0.08
+                pos = physics.p_pos[i]
+                m_part = get_model_matrix(pos[0], pos[1], pos[2], s, s, s)
+                render_obj(m_part, (0.7 * life, 0.7 * life, 0.8 * life))
 
+        self.image.blit()
         self.ctx.end_frame()
 
 
@@ -308,30 +347,27 @@ if __name__ == "__main__":
     glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
     glfw.window_hint(glfw.SAMPLES, 4)
 
-    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer (Full 3D)", None, None)
+    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer", None, None)
     glfw.make_context_current(window)
-    glfw.swap_interval(0)  # Disable VSync for smooth mouse (we use accumulator anyway)
+    glfw.swap_interval(0)
 
-    # LOCK MOUSE
     glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
     if glfw.raw_mouse_motion_supported():
         glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.TRUE)
 
-    # 3D Platforms: x, y, z, hw, hh, hd
     platforms = [
-        Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0),  # Big Floor
-        Platform(0.0, 0.5, -5.0, 1.5, 0.2, 1.5),  # Back Platform
-        Platform(-5.0, 1.5, 0.0, 1.0, 0.2, 1.0),  # Left High Platform
-        Platform(5.0, 0.0, 2.0, 1.0, 0.2, 3.0),  # Right Long Ramp-ish
-        Platform(0.0, 2.5, -8.0, 0.5, 0.1, 0.5),  # Tiny far jump
-        Platform(0.5, 2.7, 1.0, 2.0, 3.2, 1.3) # wall
+        Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0),
+        Platform(0.0, 0.5, -5.0, 1.5, 0.2, 1.5),
+        Platform(-5.0, 1.5, 0.0, 1.0, 0.2, 1.0),
+        Platform(5.0, 0.0, 2.0, 1.0, 0.2, 3.0),
+        Platform(0.0, 2.5, -8.0, 0.5, 0.1, 0.5),
+        Platform(0.0, 3.5, 5.0, 4.0, 0.2, 0.5),  # Wide wall to test climbing
     ]
 
     renderer = Renderer(zengl.context(), platforms)
     physics = PhysicsEngine(platforms)
 
 
-    # INPUT CALLBACKS
     def on_key(win, key, scancode, action, mods):
         if key == glfw.KEY_ESCAPE: glfw.set_window_should_close(win, True)
         if action == glfw.PRESS:
@@ -341,8 +377,6 @@ if __name__ == "__main__":
 
 
     def on_mouse(win, xpos, ypos):
-        # We need relative motion.
-        # Standard way: keep center, or delta. Simple way:
         if not hasattr(on_mouse, 'last_x'):
             on_mouse.last_x, on_mouse.last_y = xpos, ypos
             return
@@ -363,13 +397,12 @@ if __name__ == "__main__":
     # LOOP CONFIG
     TARGET_FPS = 60.0
     FIXED_DT = 1.0 / TARGET_FPS
-    SUB_STEPS = 4  # 3D physics can be heavier
+    SUB_STEPS = 4
     PHYSICS_DT = FIXED_DT / SUB_STEPS
 
     accumulator = 0.0
     last_time = time.perf_counter()
 
-    # Interpolation buffers
     px, py, pz = physics.player_data[0:3]
     prev_px, prev_py, prev_pz = px, py, pz
 

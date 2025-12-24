@@ -382,7 +382,7 @@ if __name__ == "__main__":
     glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
     glfw.window_hint(glfw.SAMPLES, 4)
 
-    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer", None, None)
+    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 2.5D Platformer", None, None)
     glfw.make_context_current(window)
     glfw.swap_interval(1)
 
