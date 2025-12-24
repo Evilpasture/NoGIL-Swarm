@@ -16,7 +16,6 @@ print(f"Python {sys.version.split()[0]} | {GIL_STATE}")
 WINDOW_SIZE = (1280, 720)
 
 # --- 1. DATA: Standard Cube ---
-# (Winding order doesn't matter anymore because we disabled culling)
 cube_vertices = np.array([
     # Back face
     -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5,
@@ -125,64 +124,104 @@ class PhysicsEngine:
         self.max_particles = 2000
         self.p_pos = np.zeros((self.max_particles, 3), dtype='f4')
         self.p_vel = np.zeros((self.max_particles, 3), dtype='f4')
-        self.p_life = np.zeros(self.max_particles, dtype='f4')  # 0.0 means dead
+        self.p_life = np.zeros(self.max_particles, dtype='f4')
         self.p_idx = 0
+        self.on_ground = False
 
     def spawn_burst(self, x, y, count, color=(0.8, 0.8, 0.8)):
         for _ in range(count):
             idx = self.p_idx % self.max_particles
             self.p_pos[idx] = [x, y, 0.0]
+            # Random burst velocity
             self.p_vel[idx] = [
-                np.random.uniform(-0.05, 0.05),
-                np.random.uniform(0.05, 0.15),
-                np.random.uniform(-0.05, 0.05)
+                np.random.uniform(-1.0, 1.0),
+                np.random.uniform(1.0, 3.0),
+                np.random.uniform(-1.0, 1.0)
             ]
             self.p_life[idx] = 1.0
             self.p_idx += 1
 
     def step(self, dt):
         px, py, vx, vy = self.player_data
-        vy += -0.4 * dt
-        vx *= 0.85
-        if self.keys.get(glfw.KEY_LEFT): vx -= 0.005
-        if self.keys.get(glfw.KEY_RIGHT): vx += 0.005
-        new_x, new_y = px + vx, py + vy
-        on_ground = False
 
-        if self.keys.get(glfw.KEY_UP) and on_ground:
-            vy = 0.15
-            self.spawn_burst(px, py - 0.1, 200, (1.0, 1.0, 1.0))  # 200 particles at once!
+        # --- TUNING CONSTANTS (Units per Second) ---
+        GRAVITY = -25.0
+        JUMP_FORCE = 8.5
+        MOVE_ACCEL = 30.0
+        FRICTION = 10.0
+        MAX_FALL_SPEED = -15.0
 
-        # Spawn "trail" particles while moving
-        if abs(vx) > 0.02 and on_ground:
-            self.spawn_burst(px, py - 0.1, 2, (0.4, 0.4, 0.4))
+        # 1. Apply Forces
+        vy += GRAVITY * dt
+        vy = max(vy, MAX_FALL_SPEED)  # Terminal velocity
 
+        # Horizontal Friction (Damping)
+        # We reduce velocity proportional to time
+        vx -= vx * FRICTION * dt
+
+        # Input
+        if self.keys.get(glfw.KEY_LEFT): vx -= MOVE_ACCEL * dt
+        if self.keys.get(glfw.KEY_RIGHT): vx += MOVE_ACCEL * dt
+
+        # Jump
+        if self.keys.get(glfw.KEY_UP) and self.on_ground:
+            vy = JUMP_FORCE
+            self.on_ground = False
+            self.spawn_burst(px, py - 0.1, 20, (1.0, 1.0, 1.0))
+
+        # 2. Integrate Position (Velocity * Time)
+        # This acts as the fix for "Too Fast" movement
+        new_x = px + vx * dt
+        new_y = py + vy * dt
+
+        # Reset ground (collision will set it to True if we hit floor)
+        self.on_ground = False
+
+        # Particles
+        if abs(vx) > 0.5 and self.on_ground:
+            self.spawn_burst(px, py - 0.1, 1, (0.4, 0.4, 0.4))
+
+        # 3. Collision Resolution
         cx, cy = int(new_x // self.cell_size), int(new_y // self.cell_size)
 
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
                 for plat in self.grid.get((cx + dx, cy + dy), []):
                     rx, ry, rw, rh = plat.x, plat.y, plat.hw, plat.hh
-                    if (abs(new_x - rx) < (rw + self.pw)) and (abs(new_y - ry) < (rh + self.ph)):
-                        if abs(px - rx) < (rw + self.pw - 0.02):
-                            if vy < 0 and py >= (ry + rh - 0.02):
-                                new_y, vy, on_ground = ry + rh + self.ph, 0, True
-                            elif vy > 0 and py <= (ry - rh + 0.02):
-                                new_y, vy = ry - rh - self.ph, 0
-                        elif abs(py - ry) < (rh + self.ph - 0.02):
-                            new_x, vx = (rx - rw - self.pw if vx > 0 else rx + rw + self.pw), 0
-        if self.keys.get(glfw.KEY_UP) and on_ground: vy = 0.15
+
+                    diff_x = new_x - rx
+                    diff_y = new_y - ry
+                    overlap_x = (rw + self.pw) - abs(diff_x)
+                    overlap_y = (rh + self.ph) - abs(diff_y)
+
+                    if overlap_x > 0 and overlap_y > 0:
+                        if overlap_x < overlap_y:
+                            # Wall
+                            new_x += overlap_x if diff_x > 0 else -overlap_x
+                            vx = 0
+                        else:
+                            # Floor/Ceiling
+                            if diff_y > 0:
+                                if vy <= 0:  # Only snap if falling
+                                    new_y += overlap_y
+                                    vy = 0
+                                    self.on_ground = True
+                            else:
+                                if vy > 0:  # Ceiling hit
+                                    new_y -= overlap_y
+                                    vy = 0
+
+        # Respawn
         if new_y < -5.0: new_x, new_y, vx, vy = 0.0, 2.0, 0.0, 0.0
+
         self.player_data[:] = [new_x, new_y, vx, vy]
 
+        # Update Particles
         active = self.p_life > 0
-        self.p_pos[active] += self.p_vel[active]
-        self.p_vel[active, 1] -= 0.2 * dt  # Gravity
-        self.p_life[active] -= 1.0 * dt  # Decay
-
-        # Spawn "dust" if moving fast on ground
-        if abs(vx) > 0.01 and on_ground:
-            self.spawn_burst(px, py - 0.1, 1, (0.5, 0.5, 0.5))
+        if np.any(active):
+            self.p_pos[active] += self.p_vel[active] * dt
+            self.p_vel[active, 1] += GRAVITY * dt  # Particles obey gravity
+            self.p_life[active] -= 2.0 * dt
 
         return new_x, new_y
 
@@ -374,9 +413,13 @@ if __name__ == "__main__":
 
     last_time = time.perf_counter()
     while not glfw.window_should_close(window):
-        now = time.perf_counter()
-        px, py = physics.step(0.016)
-        physics.step(0.016)
+        # Fixed time step logic
+        sub_steps = 8  # Higher is smoother physics
+        dt = 0.0166 / sub_steps  # Assuming 60 FPS target (16.6ms)
+
+        for _ in range(sub_steps):
+            px, py = physics.step(dt)
+
         renderer.draw(px, py)
         glfw.swap_buffers(window)
         glfw.poll_events()
