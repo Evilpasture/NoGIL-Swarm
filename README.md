@@ -36,13 +36,10 @@ Note: If you run this on a standard (non-t) Python build, the simulation will st
 
 ## Features?
 
-* Python 3.14t (Experimental): Fully utilizes the --threading build to execute physics logic without the Global Interpreter Lock (GIL).
-
-* High-Frequency Physics: 6 dedicated worker threads running independent Euler integration at ~200Hz.
-
-* Zero-Copy GPU Pipeline: Leverages ZenGL for hardware-accelerated instancing of 200,000+ entities with a single draw call.
-
-* Non-Linear Vector Fields: Real-time switching between tangential vortex (Whirlpool) and radial inverse-distance forces (Shockwave).
+This project demonstrates two distinct approaches to high-performance particle simulations in Python. 
+It tracks the journey from optimizing CPU threads in a 
+Free-Threaded (No-GIL) environment to leveraging GPGPU (General-Purpose computing on Graphics Processing Units) to 
+handle tens of millions of entities. See [main.py](main.py) and [main-GPGPU.py](main-GPGPU.py)
 
 Perhaps Python will finally be used in rendering? 
 God knows. All I know is that I wrestled with the pipeline of ZenGL, and I had to use ZenGL as my first renderer.
