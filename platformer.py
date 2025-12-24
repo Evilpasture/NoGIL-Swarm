@@ -24,41 +24,58 @@ class PhysicsEngine:
         self.keys = {}
         self.running = True
 
-    def update(self):
-        while self.running:
-            px, py, vx, vy = self.player_data
-            gravity, friction = -0.0022, 0.85
-            vy += gravity
-            vx *= friction
+    def step_physics(self, dt):
+        """Helper to contain the actual math, making it independent of loop speed"""
+        px, py, vx, vy = self.player_data
 
-            if self.keys.get(glfw.KEY_LEFT): vx -= 0.0025
-            if self.keys.get(glfw.KEY_RIGHT): vx += 0.0025
+        # 1. Scale constants for 'Per-Second' logic
+        # Gravity is now roughly -2.2 units per second squared
+        gravity = -0.22 * dt
+        friction = 0.85 ** (dt * 100)
 
-            new_x, new_y = px + vx, py + vy
-            on_ground = False
+        vy += gravity
+        vx *= friction
 
-            for plat in self.platforms:
-                rx = plat.x
-                ry = plat.y
-                rw = plat.hw
-                rh = plat.hh
+        if self.keys.get(glfw.KEY_LEFT): vx -= 0.0025
+        if self.keys.get(glfw.KEY_RIGHT): vx += 0.0025
 
-                if (abs(new_x - rx) < (rw + self.pw)) and (abs(new_y - ry) < (rh + self.ph)):
+        new_x, new_y = px + vx, py + vy
+        on_ground = False
+
+        for plat in self.platforms:
+            rx, ry, rw, rh = plat.x, plat.y, plat.hw, plat.hh
+
+            if (abs(new_x - rx) < (rw + self.pw)) and (abs(new_y - ry) < (rh + self.ph)):
+                # Landing/Ceiling
+                if abs(px - rx) < (rw + self.pw - 0.02):
                     if vy < 0 and py >= (ry + rh - 0.02):
-                        new_y, vy, on_ground = ry + rh + self.pw, 0, True
+                        new_y, vy, on_ground = ry + rh + self.ph, 0, True
                     elif vy > 0 and py <= (ry - rh + 0.02):
-                        new_y, vy = ry - rh - self.pw, 0
-                    elif abs(py - ry) < (rh + self.ph - 0.02):
-                        new_x, vx = (
-                            rx - rw - self.pw if vx > 0 else rx + rw + self.pw,
-                            0,
-                        )
+                        new_y, vy = ry - rh - self.ph, 0
+                # Walls
+                elif abs(py - ry) < (rh + self.ph - 0.02):
+                    new_x, vx = (rx - rw - self.pw if vx > 0 else rx + rw + self.pw), 0
 
-            if self.keys.get(glfw.KEY_UP) and on_ground:
-                vy = 0.045
+        if self.keys.get(glfw.KEY_UP) and on_ground:
+            vy = 0.045  # Back to your original perfect jump value
 
-            self.player_data[:] = [new_x, new_y, vx, vy]
-            time.sleep(0.01) # Funky. Reminder to fix this loop timing.
+        self.player_data[:] = [new_x, new_y, vx, vy]
+
+    def update(self):
+        """The Loop: Manages time and calls step_physics"""
+        last_time = time.perf_counter()
+        while self.running:
+            now = time.perf_counter()
+            dt = now - last_time
+            last_time = now
+
+            # This ensures that even if the thread sleeps longer,
+            # the player doesn't move 50x faster than intended.
+            self.step_physics(dt)
+
+            # Sleep slightly to let the CPU breathe,
+            # the dt calculation above will handle the variation.
+            time.sleep(0.008)
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
