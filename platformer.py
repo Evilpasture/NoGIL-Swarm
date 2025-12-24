@@ -4,9 +4,15 @@ import numpy as np
 import threading
 import time
 import struct
+import sys
 
 from dataclasses import dataclass
 from collections import defaultdict
+
+# verify
+is_free_threaded = hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled() == False
+GIL_STATE = "No GIL (True Parallelism)" if is_free_threaded else "GIL Active"
+print(f"Python {sys.version.split()[0]} | {GIL_STATE}")
 
 @dataclass
 class Platform:
