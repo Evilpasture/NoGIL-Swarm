@@ -26,6 +26,7 @@ class PhysicsEngine:
     """This gives objects the physical properties they should have"""
     def __init__(self, platforms):
         self.player_data = np.array([0.0, 0.0, 0.0, 0.0], dtype='f4')
+        self.prev_player_pos = np.array([0.0, 0.0], dtype='f4')
         self.platforms = platforms
         self.pw, self.ph = 0.05, 0.05
         self.keys = {}
@@ -35,6 +36,8 @@ class PhysicsEngine:
         self.cell_size = 0.5
         self.grid = defaultdict(list)
         self._build_grid()
+
+        self.alpha = 0.0
 
     def _build_grid(self):
         for p in self.platforms:
@@ -49,6 +52,9 @@ class PhysicsEngine:
 
     def step_physics(self, dt):
         """Now called with a FIXED dt (e.g., 0.01) every time"""
+        # Save current position as previous before moving
+        self.prev_player_pos[:] = self.player_data[:2]
+
         px, py, vx, vy = self.player_data
 
         gravity = -0.22
@@ -107,6 +113,8 @@ class PhysicsEngine:
             while accumulator >= fixed_dt:
                 self.step_physics(fixed_dt)
                 accumulator -= fixed_dt
+
+            self.alpha = accumulator / fixed_dt
 
             # Yield to OS - helps No-GIL threads breathe
             time.sleep(0.001)
@@ -191,10 +199,11 @@ class Game:
         # Add more platforms to test scrolling
         # x, y, half_width, half_height
         platforms = [
-            Platform(0.0, -0.8, 1.0, 0.1),
+            Platform(0.0, -0.8, 3.0, 0.1),
             Platform(0.4, -0.4, 0.2, 0.05),
             Platform(1.2, -0.2, 0.2, 0.05),  # Far right platform
             Platform(2.0, 0.1, 0.2, 0.05),  # Even further
+            Platform(3.0, 0.3, 0.2, 0.05),
         ]
         self.physics = PhysicsEngine(platforms)
         self.renderer = Renderer(zengl.context(), platforms)
@@ -210,7 +219,14 @@ class Game:
 
     def run(self):
         while not glfw.window_should_close(self.window):
-            self.renderer.draw(self.physics.player_data[:2])
+            # LERP: (Current * Alpha) + (Previous * (1.0 - Alpha))
+            alpha = self.physics.alpha
+            current = self.physics.player_data[:2]
+            prev = self.physics.prev_player_pos
+
+            visual_pos = current * alpha + prev * (1.0 - alpha)
+
+            self.renderer.draw(visual_pos)
             glfw.swap_buffers(self.window)
             glfw.poll_events()
         glfw.terminate()
