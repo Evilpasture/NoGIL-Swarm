@@ -81,40 +81,101 @@ mouse_vel = np.array([0.0, 0.0], dtype='f4')
 
 # 3. WORKER LOGIC
 def worker_logic(start, end):
-    p_slice = physics_data['pos'][start:end]
-    v_slice = physics_data['vel'][start:end]
-    pr_slice = 1.0 / props[start:end]
+    # 1. Create Views (References, no copy)
+    p = physics_data['pos'][start:end]
+    v = physics_data['vel'][start:end]
+
+    # 2. PRE-ALLOCATE TEMPORARY BUFFERS ONCE
+    # We reuse these blocks of memory every frame, zero "malloc" in the loop.
+    count = end - start
+    dx = np.zeros(count, dtype='f4')
+    dy = np.zeros(count, dtype='f4')
+    dist_sq = np.zeros(count, dtype='f4')
+    inv_dist = np.zeros(count, dtype='f4')
+    force = np.zeros(count, dtype='f4')
+
+    # Pre-calc inverse mass
+    inv_m = (1.0 / props[start:end])
 
     while running:
-        start_sim.wait()  # Wait for frame start
+        start_sim.wait()
 
-        # ... (Math logic remains the same) ...
-        dx = target[0] - p_slice[:, 0]
-        dy = target[1] - p_slice[:, 1]
-        dist_sq = dx * dx + dy * dy + 60.0
-        inv_dist = 1.0 / np.sqrt(dist_sq)
+        # --- ALLOCATION-FREE MATH ---
 
-        # Vectorized physics update
+        # dx = target[0] - p[:, 0]
+        np.subtract(target[0], p[:, 0], out=dx)
+        np.subtract(target[1], p[:, 1], out=dy)
+
+        # dist_sq = dx^2 + dy^2 + 60.0
+        np.square(dx, out=dist_sq)  # dist_sq = dx^2
+        np.square(dy, out=force)  # force (temp) = dy^2
+        np.add(dist_sq, force, out=dist_sq)
+        np.add(dist_sq, 60.0, out=dist_sq)
+
+        # inv_dist = 1.0 / sqrt(dist_sq)
+        np.sqrt(dist_sq, out=dist_sq)
+        np.reciprocal(dist_sq, out=inv_dist)
+
+        # Force Calculation
         if is_repelling:
-            force = -1200.0 * (inv_dist ** 3) * 12000.0
-            ax = (dx * force + mouse_vel[0] * 8.0) * pr_slice
-            ay = (dy * force + mouse_vel[1] * 8.0) * pr_slice
+            # force = -1200 * inv_dist^3 * 12000
+            np.power(inv_dist, 3, out=force)
+            np.multiply(force, -14400000.0, out=force)
+
+            # Apply to Velocity (reusing dist_sq as temp buffer for acceleration)
+            # ax = (dx * force + mvel * 8) * inv_m
+            np.multiply(dx, force, out=dist_sq)
+            np.add(dist_sq, mouse_vel[0] * 8.0, out=dist_sq)
+            np.multiply(dist_sq, inv_m, out=dist_sq)  # dist_sq is now 'ax'
+
+            # vx += ax * DT * 0.99
+            np.multiply(dist_sq, DT, out=dist_sq)
+            np.add(v[:, 0], dist_sq, out=v[:, 0])
+
+            # Repeat for Y...
+            np.multiply(dy, force, out=dist_sq)
+            np.add(dist_sq, mouse_vel[1] * 8.0, out=dist_sq)
+            np.multiply(dist_sq, inv_m, out=dist_sq)  # dist_sq is now 'ay'
+
+            np.multiply(dist_sq, DT, out=dist_sq)
+            np.add(v[:, 1], dist_sq, out=v[:, 1])
+
         else:
-            force = 40.0 * inv_dist
-            ax = (dx * force + mouse_vel[0] * 5.0) * pr_slice
-            ay = (dy * force + mouse_vel[1] * 5.0) * pr_slice
+            # force = 40.0 * inv_dist
+            np.multiply(inv_dist, 40.0, out=force)
 
-        v_slice[:, 0] = (v_slice[:, 0] + ax * DT) * 0.99
-        v_slice[:, 1] = (v_slice[:, 1] + ay * DT) * 0.99
-        p_slice += v_slice
+            # ax = (dx * force + mvel * 5) * inv_m
+            np.multiply(dx, force, out=dist_sq)
+            np.add(dist_sq, mouse_vel[0] * 5.0, out=dist_sq)
+            np.multiply(dist_sq, inv_m, out=dist_sq)
 
-        # Screen Wrap
-        p_slice[p_slice[:, 0] > 640, 0] = -640
-        p_slice[p_slice[:, 0] < -640, 0] = 640
-        p_slice[p_slice[:, 1] > 360, 1] = -360
-        p_slice[p_slice[:, 1] < -360, 1] = 360
+            np.multiply(dist_sq, DT, out=dist_sq)
+            np.add(v[:, 0], dist_sq, out=v[:, 0])
 
-        done_sim.wait()  # Signal math is done
+            # ay
+            np.multiply(dy, force, out=dist_sq)
+            np.add(dist_sq, mouse_vel[1] * 5.0, out=dist_sq)
+            np.multiply(dist_sq, inv_m, out=dist_sq)
+
+            np.multiply(dist_sq, DT, out=dist_sq)
+            np.add(v[:, 1], dist_sq, out=v[:, 1])
+
+        # Global Damping
+        np.multiply(v, 0.99, out=v)
+
+        # Position Update: p += v
+        np.add(p, v, out=p)
+
+        # Boundary Wrap (Masking creates copies, so we use 'where' or boolean indexing carefully)
+        # Using boolean indexing in numpy usually copies, but for setting values it's often optimized.
+        # Ideally, we would use np.where, but that allocates.
+        # This is the one part where standard syntax is usually fine because it affects few particles.
+        p[p[:, 0] > 640, 0] = -640
+        p[p[:, 0] < -640, 0] = 640
+        p[p[:, 1] > 360, 1] = -360
+        p[p[:, 1] < -360, 1] = 360
+
+        done_sim.wait()
 
 
 # Start Workers
