@@ -63,8 +63,12 @@ class PhysicsEngine:
 
     def update(self):
         """The Loop: Manages time and calls step_physics"""
+        target_dt = 1.0 / 100.0  # 100Hz Physics
         last_time = time.perf_counter()
         while self.running:
+            while time.perf_counter() - last_time < target_dt:
+                pass
+
             now = time.perf_counter()
             dt = now - last_time
             last_time = now
@@ -73,9 +77,6 @@ class PhysicsEngine:
             # the player doesn't move 50x faster than intended.
             self.step_physics(dt)
 
-            # Sleep slightly to let the CPU breathe,
-            # the dt calculation above will handle the variation.
-            time.sleep(0.008)
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
