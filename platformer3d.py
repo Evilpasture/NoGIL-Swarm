@@ -122,17 +122,23 @@ class PhysicsEngine:
                 for cy in range(min_cy, max_cy + 1):
                     self.grid[(cx, cy)].append(p)
 
-        self.particles = []
+        self.max_particles = 2000
+        self.p_pos = np.zeros((self.max_particles, 3), dtype='f4')
+        self.p_vel = np.zeros((self.max_particles, 3), dtype='f4')
+        self.p_life = np.zeros(self.max_particles, dtype='f4')  # 0.0 means dead
+        self.p_idx = 0
 
-    def spawn_burst(self, x, y, color, count=10):
+    def spawn_burst(self, x, y, count, color=(0.8, 0.8, 0.8)):
         for _ in range(count):
-            self.particles.append(Particle(
-                x, y, 0.0,
-                np.random.uniform(-0.05, 0.05),  # vx
-                np.random.uniform(0.01, 0.1),  # vy
-                np.random.uniform(-0.05, 0.05),  # vz
-                1.0, color
-            ))
+            idx = self.p_idx % self.max_particles
+            self.p_pos[idx] = [x, y, 0.0]
+            self.p_vel[idx] = [
+                np.random.uniform(-0.05, 0.05),
+                np.random.uniform(0.05, 0.15),
+                np.random.uniform(-0.05, 0.05)
+            ]
+            self.p_life[idx] = 1.0
+            self.p_idx += 1
 
     def step(self, dt):
         px, py, vx, vy = self.player_data
@@ -142,10 +148,17 @@ class PhysicsEngine:
         if self.keys.get(glfw.KEY_RIGHT): vx += 0.005
         new_x, new_y = px + vx, py + vy
         on_ground = False
+
         if self.keys.get(glfw.KEY_UP) and on_ground:
             vy = 0.15
-            self.spawn_burst(px, py - 0.1, (1.0, 1.0, 1.0), 15)  # White "poof" on jump
+            self.spawn_burst(px, py - 0.1, 200, (1.0, 1.0, 1.0))  # 200 particles at once!
+
+        # Spawn "trail" particles while moving
+        if abs(vx) > 0.02 and on_ground:
+            self.spawn_burst(px, py - 0.1, 2, (0.4, 0.4, 0.4))
+
         cx, cy = int(new_x // self.cell_size), int(new_y // self.cell_size)
+
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for plat in self.grid.get((cx + dx, cy + dy), []):
@@ -162,18 +175,14 @@ class PhysicsEngine:
         if new_y < -5.0: new_x, new_y, vx, vy = 0.0, 2.0, 0.0, 0.0
         self.player_data[:] = [new_x, new_y, vx, vy]
 
-        for p in self.particles[:]:
-            p.x += p.vx
-            p.y += p.vy
-            p.z += p.vz
-            p.vy -= 0.2 * dt  # gravity
-            p.life -= 1.5 * dt
-            if p.life <= 0:
-                self.particles.remove(p)
+        active = self.p_life > 0
+        self.p_pos[active] += self.p_vel[active]
+        self.p_vel[active, 1] -= 0.2 * dt  # Gravity
+        self.p_life[active] -= 1.0 * dt  # Decay
 
-            # Spawn "dust" if moving fast on ground
+        # Spawn "dust" if moving fast on ground
         if abs(vx) > 0.01 and on_ground:
-            self.spawn_burst(px, py - 0.1, (0.5, 0.5, 0.5), 1)
+            self.spawn_burst(px, py - 0.1, 1, (0.5, 0.5, 0.5))
 
         return new_x, new_y
 
@@ -318,14 +327,14 @@ class Renderer:
 
         render_obj(m_p, (1.0, 0.5, 0.0))
 
-        for p in physics.particles:
-            # Scale based on remaining life
-            s_val = 0.05 * p.life
-            m_part = get_model_matrix(p.x, p.y, p.z, s_val, s_val, s_val)
-
-            # Fade color based on life
-            p_color = (p.color[0] * p.life, p.color[1] * p.life, p.color[2] * p.life)
-            render_obj(m_part, p_color)
+        for i in range(physics.max_particles):
+            life = physics.p_life[i]
+            if life > 0:
+                s = life * 0.08
+                pos = physics.p_pos[i]
+                m_part = get_model_matrix(pos[0], pos[1], pos[2], s, s, s)
+                # Use a grayish-white for dust, fading with life
+                render_obj(m_part, (0.7 * life, 0.7 * life, 0.8 * life))
 
         self.pipeline_2d.render()
         self.image.blit()
