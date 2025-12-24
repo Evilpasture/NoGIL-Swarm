@@ -6,6 +6,7 @@ import time
 import struct
 
 from dataclasses import dataclass
+from collections import defaultdict
 
 @dataclass
 class Platform:
@@ -30,10 +31,10 @@ class PhysicsEngine:
 
         # 1. Scale constants for 'Per-Second' logic
         # Gravity is now roughly -2.2 units per second squared
-        gravity = -0.22 * dt
+        gravity = -0.22 # don't put this too strong
         friction = 0.85 ** (dt * 100)
 
-        vy += gravity
+        vy += gravity * dt
         vx *= friction
 
         if self.keys.get(glfw.KEY_LEFT): vx -= 0.0025
@@ -42,7 +43,35 @@ class PhysicsEngine:
         new_x, new_y = px + vx, py + vy
         on_ground = False
 
-        for plat in self.platforms:
+        # GRID STUFF (might need fix, because smelly)
+
+        cell_size = 0.5
+
+        grid = defaultdict(list)
+
+        def cell(x):
+            return int(x // cell_size)
+
+        for p in self.platforms:
+            min_cx = cell(p.x - p.hw)
+            max_cx = cell(p.x + p.hw)
+            min_cy = cell(p.y - p.hh)
+            max_cy = cell(p.y + p.hh)
+
+            for cx in range(min_cx, max_cx + 1):
+                for cy in range(min_cy, max_cy + 1):
+                    grid[(cx, cy)].append(p)
+
+            px, py = new_x, new_y
+            cx, cy = cell(px), cell(py)
+
+            candidates = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    candidates.extend(grid.get((cx + dx, cy + dy), []))
+
+        # PYTHON FOR LOOP!!! O(n) is where all engines die in a ditch. Trying to find alternatives.
+        for plat in candidates:
             rx, ry, rw, rh = plat.x, plat.y, plat.hw, plat.hh
 
             if (abs(new_x - rx) < (rw + self.pw)) and (abs(new_y - ry) < (rh + self.ph)):
@@ -66,8 +95,10 @@ class PhysicsEngine:
         target_dt = 1.0 / 100.0  # 100Hz Physics
         last_time = time.perf_counter()
         while self.running:
-            while time.perf_counter() - last_time < target_dt:
-                pass
+            elapsed = time.perf_counter() - last_time
+            sleep_time = target_dt - elapsed
+            if sleep_time > 0.0:
+                time.sleep(sleep_time)
 
             now = time.perf_counter()
             dt = now - last_time
