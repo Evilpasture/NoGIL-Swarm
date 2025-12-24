@@ -89,6 +89,13 @@ def get_model_matrix(x, y, z, sx, sy, sz):
     m[2, 3] = z
     return m
 
+def get_rotation_z(angle):
+    c, s = np.cos(angle), np.sin(angle)
+    res = np.eye(4, dtype='f4')
+    res[0,0] = c;  res[0,1] = s
+    res[1,0] = -s; res[1,1] = c
+    return res
+
 
 # --- 3. PHYSICS ---
 class PhysicsEngine:
@@ -147,6 +154,7 @@ class Renderer:
 
         self.cam_x = 0.0
         self.cam_y = 0.0
+        self.tilt_angle = 0.0
 
         self.vbo = ctx.buffer(cube_vertices)
 
@@ -254,7 +262,24 @@ class Renderer:
         floor_m = get_model_matrix(player_x, -15.0, -10.0, 100.0, 1.0, 100.0)
         render_obj(floor_m, (0.05, 0.05, 0.1))  # Dark Blue floor
 
-        m_p = get_model_matrix(player_x, player_y, 0.0, 0.2, 0.2, 0.2)
+        # Calculate target tilt based on velocity (approximated by position diff)
+        # If player is to the right of camera, tilt right, etc.
+        target_tilt = -(player_x - self.cam_x) * 1.5
+
+        # Smooth the tilt (Lerp)
+        self.tilt_angle += (target_tilt - self.tilt_angle) * 0.1
+
+        # 1. Scale
+        s = np.diag([0.2, 0.2, 0.2, 1.0]).astype('f4')
+        # 2. Rotate (Z-axis tilt)
+        r = get_rotation_z(self.tilt_angle)
+        # 3. Translate
+        t = np.eye(4, dtype='f4')
+        t[0:3, 3] = [player_x, player_y, 0.0]
+
+        # Model = T * R * S
+        m_p = t @ r @ s
+
         render_obj(m_p, (1.0, 0.5, 0.0))
 
         self.pipeline_2d.render()
@@ -269,7 +294,7 @@ if __name__ == "__main__":
     glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
     glfw.window_hint(glfw.SAMPLES, 4)
 
-    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer Solved", None, None)
+    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer", None, None)
     glfw.make_context_current(window)
     glfw.swap_interval(1)
 
