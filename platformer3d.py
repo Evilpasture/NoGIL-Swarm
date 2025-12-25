@@ -16,6 +16,7 @@ print(f"Python {sys.version.split()[0]} | {GIL_STATE}")
 # --- Configuration ---
 WINDOW_SIZE = (1280, 720)
 MOUSE_SENSITIVITY = 0.003
+SCROLL_SENSITIVITY = 1.0
 
 # --- 1. DATA ---
 cube_vertices = np.array([
@@ -48,13 +49,6 @@ class Platform:
     hw: float
     hh: float
     hd: float
-
-@dataclass
-class Particle:
-    x: float; y: float; z: float
-    vx: float; vy: float; vz: float
-    life: float  # Starts at 1.0, disappears at 0.0
-    color: tuple
 
 
 # --- 2. MATH ---
@@ -93,6 +87,34 @@ def get_model_matrix(x, y, z, sx, sy, sz):
     return m
 
 
+def ray_aabb_intersect(origin, direction, box_min, box_max):
+    """
+    Slab Method for Ray-AABB intersection.
+    Returns distance to hit, or infinity if no hit.
+    """
+    sign = np.sign(direction)
+    sign[sign == 0] = 1.0  # Handle exact zero
+
+    # safe_dir is never smaller than 1e-9, and always has correct sign
+    safe_dir = sign * np.maximum(np.abs(direction), 1e-9)
+    inv_dir = 1.0 / safe_dir
+
+    t0 = (box_min - origin) * inv_dir
+    t1 = (box_max - origin) * inv_dir
+
+    tmin = np.minimum(t0, t1)
+    tmax = np.maximum(t0, t1)
+
+    # Largest tmin (entry point)
+    t_enter = np.max(tmin)
+    # Smallest tmax (exit point)
+    t_exit = np.min(tmax)
+
+    if t_exit >= t_enter and t_exit > 0:
+        return t_enter
+    return float('inf')
+
+
 # --- 3. PHYSICS ---
 class PhysicsEngine:
     def __init__(self, platforms):
@@ -103,8 +125,12 @@ class PhysicsEngine:
         # Player dimensions
         self.pw, self.ph, self.pd = 0.2, 0.2, 0.2
         self.on_ground = False
+
+        # Camera State
         self.cam_yaw = -1.57
         self.cam_pitch = -0.3
+        self.target_zoom = 6.0  # Desired distance (set by scroll)
+        self.current_zoom = 6.0  # Physical distance (clamped by walls)
 
         # Particles
         self.max_particles = 2000
@@ -162,29 +188,19 @@ class PhysicsEngine:
             self.on_ground = False
 
         # --- COLLISION LOGIC ---
-
-        # Allowance: How deep can we be inside a block vertically before we consider it a wall?
-        # 0.25 covers falling speed and small steps.
         VERTICAL_ALLOWANCE = 0.25
 
         # 1. X-AXIS
         px += vx * dt
         for p in self.platforms:
             if self.check_overlap(px, py, pz, p):
-                # Vertical Filtering:
-                # If our feet are near the top, it's a floor.
                 feet_y = py - self.ph
                 plat_top = p.y + p.hh
-                if feet_y >= plat_top - VERTICAL_ALLOWANCE:
-                    continue  # Ignore X collision (it's a floor)
-
-                # If our head is near the bottom, it's a ceiling.
+                if feet_y >= plat_top - VERTICAL_ALLOWANCE: continue
                 head_y = py + self.ph
                 plat_bot = p.y - p.hh
-                if head_y <= plat_bot + VERTICAL_ALLOWANCE:
-                    continue  # Ignore X collision (it's a ceiling)
+                if head_y <= plat_bot + VERTICAL_ALLOWANCE: continue
 
-                # Otherwise, it is a wall. Resolve X.
                 if px < p.x:
                     px = p.x - p.hw - self.pw - 0.001
                 else:
@@ -195,18 +211,13 @@ class PhysicsEngine:
         pz += vz * dt
         for p in self.platforms:
             if self.check_overlap(px, py, pz, p):
-                # EXACT SAME FILTERING
                 feet_y = py - self.ph
                 plat_top = p.y + p.hh
-                if feet_y >= plat_top - VERTICAL_ALLOWANCE:
-                    continue
-
+                if feet_y >= plat_top - VERTICAL_ALLOWANCE: continue
                 head_y = py + self.ph
                 plat_bot = p.y - p.hh
-                if head_y <= plat_bot + VERTICAL_ALLOWANCE:
-                    continue
+                if head_y <= plat_bot + VERTICAL_ALLOWANCE: continue
 
-                    # Resolve Z
                 if pz < p.z:
                     pz = p.z - p.hd - self.pd - 0.001
                 else:
@@ -218,26 +229,19 @@ class PhysicsEngine:
         py += vy * dt
         self.on_ground = False
 
-        # Visuals
         speed = np.sqrt(vx * vx + vz * vz)
         if speed > 0.5 and self.on_ground:
-            self.spawn_burst(px, py - 0.1, pz, 1, (0.4, 0.4, 0.4))
+            self.spawn_burst(px, py - 0.1, pz, 1)
 
         for p in self.platforms:
             if self.check_overlap(px, py, pz, p):
-                # Landing Logic
-                # If we were above previously, OR if we are just slightly penetrating the top
-                # Snap to top.
                 if vy <= 0:
                     feet_y = py - self.ph
                     plat_top = p.y + p.hh
-                    # If we are effectively at the top (within allowance)
                     if feet_y >= plat_top - VERTICAL_ALLOWANCE:
                         py = plat_top + self.ph
                         vy = 0
                         self.on_ground = True
-
-                # Bonk Logic
                 elif vy > 0:
                     head_y = py + self.ph
                     plat_bot = p.y - p.hh
@@ -257,10 +261,37 @@ class PhysicsEngine:
             self.p_vel[active, 1] += GRAVITY * dt
             self.p_life[active] -= 2.0 * dt
 
+        # --- CAMERA RAYCAST LOGIC (SPHERE-AABB PROXY) ---
+        pivot_pos = np.array([px, py + 0.5, pz], dtype='f4')
+        cam_dir_x = np.cos(self.cam_yaw) * np.cos(self.cam_pitch)
+        cam_dir_y = np.sin(self.cam_pitch)
+        cam_dir_z = np.sin(self.cam_yaw) * np.cos(self.cam_pitch)
+        cam_dir = np.array([cam_dir_x, cam_dir_y, cam_dir_z], dtype='f4')
+
+        # Ray direction (Backwards from pivot)
+        ray_dir = -cam_dir
+        closest_hit = self.target_zoom
+
+        # FIX: Treat camera as a sphere by expanding obstacles
+        CAM_RADIUS = 0.25
+
+        for p in self.platforms:
+            # Expand the platform box by the camera radius.
+            # A ray hit on this expanded box == A sphere hit on the original box.
+            b_min = np.array([p.x - p.hw - CAM_RADIUS, p.y - p.hh - CAM_RADIUS, p.z - p.hd - CAM_RADIUS])
+            b_max = np.array([p.x + p.hw + CAM_RADIUS, p.y + p.hh + CAM_RADIUS, p.z + p.hd + CAM_RADIUS])
+
+            dist = ray_aabb_intersect(pivot_pos, ray_dir, b_min, b_max)
+
+            if dist < closest_hit:
+                closest_hit = dist
+
+        # Don't let zoom get too close (inside player's head)
+        self.current_zoom = max(0.4, closest_hit)
+
         return px, py, pz
 
     def check_overlap(self, x, y, z, p):
-        # PURE AABB - No Tricks
         return not (
                 x + self.pw <= p.x - p.hw or
                 x - self.pw >= p.x + p.hw or
@@ -323,7 +354,7 @@ class Renderer:
         # Smooth camera tracking
         self.cam_x, self.cam_y, self.cam_z = 0.0, 3.0, 5.0
 
-    def draw(self, px, py, pz, cam_yaw, cam_pitch, dt):
+    def draw(self, px, py, pz, cam_yaw, cam_pitch, zoom_dist, dt):
         self.ctx.new_frame()
         self.image.clear()
         self.depth.clear()
@@ -331,13 +362,14 @@ class Renderer:
         aspect = WINDOW_SIZE[0] / WINDOW_SIZE[1]
         proj = get_perspective(60.0, aspect, 0.1, 100.0)
 
-        dist = 6.0
-        target_cam_x = px - np.cos(cam_yaw) * np.cos(cam_pitch) * dist
-        target_cam_y = py - np.sin(cam_pitch) * dist + 1.0
-        target_cam_z = pz - np.sin(cam_yaw) * np.cos(cam_pitch) * dist
+        # Calculate Camera Position based on Zoom
+        # Note: We rely on the 'zoom_dist' passed from physics engine
+        # which has already checked for wall collisions.
+        target_cam_x = px - np.cos(cam_yaw) * np.cos(cam_pitch) * zoom_dist
+        target_cam_y = py - np.sin(cam_pitch) * zoom_dist + 1.0  # +1.0 offset (pivot height)
+        target_cam_z = pz - np.sin(cam_yaw) * np.cos(cam_pitch) * zoom_dist
 
-        # Smooth camera catch-up
-        smooth = 1.0 - 0.01 ** (dt * 6.0)
+        smooth = 1.0 - 0.01 ** (dt * 10.0)  # Faster camera follow
         self.cam_x += (target_cam_x - self.cam_x) * smooth
         self.cam_y += (target_cam_y - self.cam_y) * smooth
         self.cam_z += (target_cam_z - self.cam_z) * smooth
@@ -425,10 +457,17 @@ if __name__ == "__main__":
         physics.cam_pitch = max(-1.5, min(1.5, physics.cam_pitch))
 
 
+    # New Scroll Callback
+    def on_scroll(win, xoff, yoff):
+        physics.target_zoom -= yoff * SCROLL_SENSITIVITY
+        # Clamp zoom between 1.0 (close) and 15.0 (far)
+        physics.target_zoom = max(1.0, min(15.0, physics.target_zoom))
+
+
     glfw.set_key_callback(window, on_key)
     glfw.set_cursor_pos_callback(window, on_mouse)
+    glfw.set_scroll_callback(window, on_scroll)
 
-    # LOOP CONFIG
     TARGET_FPS = 60.0
     FIXED_DT = 1.0 / TARGET_FPS
     SUB_STEPS = 4
@@ -461,9 +500,8 @@ if __name__ == "__main__":
         ry = prev_py * (1.0 - alpha) + py * alpha
         rz = prev_pz * (1.0 - alpha) + pz * alpha
 
-        # We pass camera data from physics (updated by mouse) to renderer
-        renderer.draw(rx, ry, rz, physics.cam_yaw, physics.cam_pitch, frame_time)
-
+        # Pass current_zoom (calculated in physics step) to renderer
+        renderer.draw(rx, ry, rz, physics.cam_yaw, physics.cam_pitch, physics.current_zoom, frame_time)
         glfw.swap_buffers(window)
         glfw.poll_events()
 
