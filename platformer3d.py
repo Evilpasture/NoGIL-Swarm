@@ -51,40 +51,59 @@ class Platform:
     hd: float
 
 
-# --- 2. MATH ---
-def get_perspective(fovy_deg, aspect, near, far):
+# --- 2. ZERO-ALLOC MATH ---
+def get_perspective(fovy_deg, aspect, near, far, out):
+    out.fill(0)
     fovy = np.radians(fovy_deg)
     f = 1.0 / np.tan(fovy / 2.0)
-    res = np.zeros((4, 4), dtype='f4')
-    res[0, 0] = f / aspect
-    res[1, 1] = f
-    res[2, 2] = (far + near) / (near - far)
-    res[2, 3] = (2.0 * far * near) / (near - far)
-    res[3, 2] = -1.0
-    return res
+    # Note indices are swapped [col, row] logic relative to standard C memory
+    out[0, 0] = f / aspect
+    out[1, 1] = f
+    out[2, 2] = (far + near) / (near - far)
+    out[3, 2] = (2.0 * far * near) / (near - far)
+    out[2, 3] = -1.0
 
 
-def get_lookat(eye, target, up):
+def get_lookat(eye, target, up, out):
     z = eye - target
     z = z / np.linalg.norm(z)
     x = np.cross(up, z)
     x = x / np.linalg.norm(x)
     y = np.cross(z, x)
-    res = np.eye(4, dtype='f4')
-    res[0, :3] = x
-    res[1, :3] = y
-    res[2, :3] = z
-    res[0, 3] = -np.dot(x, eye)
-    res[1, 3] = -np.dot(y, eye)
-    res[2, 3] = -np.dot(z, eye)
-    return res
+
+    out.fill(0)
+    out[0, 0] = 1
+    out[1, 1] = 1
+    out[2, 2] = 1
+    out[3, 3] = 1
+
+    # Rotation (Transposed)
+    out[0, 0] = x[0]
+    out[0, 1] = y[0]
+    out[0, 2] = z[0]
+    out[1, 0] = x[1]
+    out[1, 1] = y[1]
+    out[1, 2] = z[1]
+    out[2, 0] = x[2]
+    out[2, 1] = y[2]
+    out[2, 2] = z[2]
+
+    # Translation (Stored in last column / bottom row of memory)
+    out[3, 0] = -np.dot(x, eye)
+    out[3, 1] = -np.dot(y, eye)
+    out[3, 2] = -np.dot(z, eye)
 
 
-def get_model_matrix(x, y, z, sx, sy, sz):
-    m = np.eye(4, dtype='f4')
-    m[0, 0], m[1, 1], m[2, 2] = sx, sy, sz
-    m[0, 3], m[1, 3], m[2, 3] = x, y, z
-    return m
+def get_model_matrix(out, x, y, z, sx, sy, sz):
+    out.fill(0)
+    out[0, 0] = sx
+    out[1, 1] = sy
+    out[2, 2] = sz
+    out[3, 3] = 1.0
+    # Translation (Stored in last column)
+    out[3, 0] = x
+    out[3, 1] = y
+    out[3, 2] = z
 
 
 def ray_aabb_intersect(origin, direction, box_min, box_max):
@@ -151,24 +170,44 @@ class PhysicsEngine:
                 np.random.uniform(-1.0, 1.0)
             ]
             self.p_life[idx] = 1.0
-            self.p_idx += 1
+            self.p_idx = (self.p_idx + 1) % self.max_particles
 
     def step(self, dt):
         px, py, pz, vx, vy, vz = self.player_data
+
+        # --- PHYSICS CONSTANTS ---
         GRAVITY = -30.0
         JUMP_FORCE = 10.0
-        ACCEL = 50.0
-        AIR_ACCEL = 10.0
 
-        FRICTION = 10.0 if self.on_ground else 0.5
-        current_accel = ACCEL if self.on_ground else AIR_ACCEL
+        # MOVEMENT TUNING
+        GROUND_MAX_SPEED = 6.0
+        GROUND_ACCEL = 50.0
+        GROUND_FRICTION = 15.0
 
+        AIR_MAX_SPEED = 6.0
+        AIR_ACCEL = 20.0
+        AIR_FRICTION = 0.5
+
+        # 1. Select Parameters
+        if self.on_ground:
+            max_speed = GROUND_MAX_SPEED
+            accel = GROUND_ACCEL
+            friction = GROUND_FRICTION
+        else:
+            max_speed = AIR_MAX_SPEED
+            accel = AIR_ACCEL
+            friction = AIR_FRICTION
+
+        # 2. Gravity
         vy += GRAVITY * dt
         vy = max(vy, -30.0)
-        damping = 1.0 / (1.0 + FRICTION * dt)
+
+        # 3. Friction
+        damping = 1.0 / (1.0 + friction * dt)
         vx *= damping
         vz *= damping
 
+        # 4. Input
         for_x, for_z = np.cos(self.cam_yaw), np.sin(self.cam_yaw)
         right_x, right_z = np.cos(self.cam_yaw + np.pi / 2), np.sin(self.cam_yaw + np.pi / 2)
         ix, iz = 0.0, 0.0
@@ -177,11 +216,19 @@ class PhysicsEngine:
         if self.keys.get(glfw.KEY_A): ix -= right_x; iz -= right_z
         if self.keys.get(glfw.KEY_D): ix += right_x; iz += right_z
 
+        # 5. Vector Projection Movement
         if ix != 0 or iz != 0:
             l = np.sqrt(ix * ix + iz * iz)
-            vx += (ix / l) * current_accel * dt
-            vz += (iz / l) * current_accel * dt
+            wish_dir_x = ix / l
+            wish_dir_z = iz / l
+            current_speed_in_wish_dir = vx * wish_dir_x + vz * wish_dir_z
+            add_speed = max_speed - current_speed_in_wish_dir
+            if add_speed > 0:
+                accel_speed = min(accel * dt, add_speed)
+                vx += wish_dir_x * accel_speed
+                vz += wish_dir_z * accel_speed
 
+        # Jump
         if self.keys.get(glfw.KEY_SPACE) and self.on_ground:
             self.spawn_burst(px, py - 0.1, pz, 20)
             vy = JUMP_FORCE
@@ -190,7 +237,7 @@ class PhysicsEngine:
         # --- COLLISION LOGIC ---
         VERTICAL_ALLOWANCE = 0.25
 
-        # 1. X-AXIS
+        # X-Axis
         px += vx * dt
         for p in self.platforms:
             if self.check_overlap(px, py, pz, p):
@@ -207,7 +254,7 @@ class PhysicsEngine:
                     px = p.x + p.hw + self.pw + 0.001
                 vx = 0
 
-        # 2. Z-AXIS
+        # Z-Axis
         pz += vz * dt
         for p in self.platforms:
             if self.check_overlap(px, py, pz, p):
@@ -224,8 +271,8 @@ class PhysicsEngine:
                     pz = p.z + p.hd + self.pd + 0.001
                 vz = 0
 
-        # 3. Y-AXIS
-        prev_py = py
+        # Y-Axis
+        # prev_py = py
         py += vy * dt
         self.on_ground = False
 
@@ -255,38 +302,52 @@ class PhysicsEngine:
 
         self.player_data[:] = [px, py, pz, vx, vy, vz]
 
+        # Particles
         active = self.p_life > 0
         if np.any(active):
             self.p_pos[active] += self.p_vel[active] * dt
             self.p_vel[active, 1] += GRAVITY * dt
             self.p_life[active] -= 2.0 * dt
 
-        # --- CAMERA RAYCAST LOGIC (SPHERE-AABB PROXY) ---
-        pivot_pos = np.array([px, py + 0.5, pz], dtype='f4')
+        # --- CAMERA LOGIC ---
+        pivot_pos = np.array([px, py, pz], dtype='f4')
         cam_dir_x = np.cos(self.cam_yaw) * np.cos(self.cam_pitch)
         cam_dir_y = np.sin(self.cam_pitch)
         cam_dir_z = np.sin(self.cam_yaw) * np.cos(self.cam_pitch)
-        cam_dir = np.array([cam_dir_x, cam_dir_y, cam_dir_z], dtype='f4')
+        ray_dir = -np.array([cam_dir_x, cam_dir_y, cam_dir_z], dtype='f4')
 
-        # Ray direction (Backwards from pivot)
-        ray_dir = -cam_dir
         closest_hit = self.target_zoom
 
-        # FIX: Treat camera as a sphere by expanding obstacles
         CAM_RADIUS = 0.25
+        PLAYER_COLLISION_RADIUS = self.pw
+
+        # FIX: Added a hard margin so we don't look directly at the polygon face
+        WALL_MARGIN = 0.2
 
         for p in self.platforms:
-            # Expand the platform box by the camera radius.
-            # A ray hit on this expanded box == A sphere hit on the original box.
-            b_min = np.array([p.x - p.hw - CAM_RADIUS, p.y - p.hh - CAM_RADIUS, p.z - p.hd - CAM_RADIUS])
-            b_max = np.array([p.x + p.hw + CAM_RADIUS, p.y + p.hh + CAM_RADIUS, p.z + p.hd + CAM_RADIUS])
+            b_min_hard = np.array([p.x - p.hw, p.y - p.hh, p.z - p.hd])
+            b_max_hard = np.array([p.x + p.hw, p.y + p.hh, p.z + p.hd])
 
-            dist = ray_aabb_intersect(pivot_pos, ray_dir, b_min, b_max)
+            # 1. Hard Collision (Actual Geometry)
+            dist_hard = ray_aabb_intersect(pivot_pos, ray_dir, b_min_hard, b_max_hard)
 
-            if dist < closest_hit:
-                closest_hit = dist
+            if dist_hard > 0.0:
+                # Apply margin to pull camera back from the wall surface
+                safe_dist = dist_hard - WALL_MARGIN
+                if safe_dist < closest_hit:
+                    closest_hit = safe_dist
 
-        # Don't let zoom get too close (inside player's head)
+            # 2. Soft Collision (Sphere Proxy)
+            b_min_soft = b_min_hard - CAM_RADIUS
+            b_max_soft = b_max_hard + CAM_RADIUS
+            dist_soft = ray_aabb_intersect(pivot_pos, ray_dir, b_min_soft, b_max_soft)
+
+            if 0.0 < dist_soft < closest_hit:
+                hit_point = pivot_pos + ray_dir * dist_soft
+                dist_to_player = np.linalg.norm(hit_point - pivot_pos)
+                if dist_to_player >= CAM_RADIUS + PLAYER_COLLISION_RADIUS:
+                    closest_hit = dist_soft
+
         self.current_zoom = max(0.4, closest_hit)
 
         return px, py, pz
@@ -309,9 +370,28 @@ class Renderer:
         self.platforms = platforms
         self.image = ctx.image(WINDOW_SIZE, 'rgba8unorm')
         self.depth = ctx.image(WINDOW_SIZE, 'depth24plus')
-        self.image.clear_value = (0.1, 0.1, 0.15, 1.0)
 
+        # 1. Geometry (The Cube)
         self.vbo = ctx.buffer(cube_vertices)
+
+        # 2. Instance Buffer (Holds data for ALL particles)
+        # Format: 3 floats (pos) + 1 float (scale) = 16 bytes per particle
+        self.instance_buffer = ctx.buffer(size=2000 * 16)
+
+        # --- PRE-ALLOCATED BUFFERS (The Anti-Leak Mechanism) ---
+        # We create these ONCE. We never use np.empty/np.zeros in draw() again.
+
+        self.particle_staging = np.zeros((2000, 4), dtype='f4')
+
+        self.proj_buf = np.eye(4, dtype='f4')
+        self.view_buf = np.eye(4, dtype='f4')
+        self.view_proj_buf = np.eye(4, dtype='f4')
+        self.model_buf = np.eye(4, dtype='f4')
+        self.mvp_buf = np.eye(4, dtype='f4')
+
+        self.color_buf = np.array([1.0, 1.0, 1.0], dtype='f4')
+
+        # 3. Main 3D Pipeline (For Player & Platforms)
         self.pipeline_3d = ctx.pipeline(
             vertex_shader='''
                 #version 330 core
@@ -344,15 +424,70 @@ class Renderer:
             ''',
             framebuffer=[self.image, self.depth],
             topology='triangles',
-            cull_face='none',
             depth={'func': 'less', 'write': True},
             vertex_buffers=[*zengl.bind(self.vbo, '3f', 0)],
             uniforms={'mvp': [0.0] * 16, 'model': [0.0] * 16, 'color': [1.0, 1.0, 1.0]},
             vertex_count=36,
         )
 
-        # Smooth camera tracking
-        self.cam_x, self.cam_y, self.cam_z = 0.0, 3.0, 5.0
+        # 4. Particle Pipeline (INSTANCED)
+        self.pipeline_particles = ctx.pipeline(
+            vertex_shader='''
+                #version 330 core
+                layout (location = 0) in vec3 in_vert;
+
+                // Per-Instance Attributes (Buffer binding 1)
+                layout (location = 1) in vec3 in_pos; 
+                layout (location = 2) in float in_scale;
+
+                uniform mat4 view;
+                uniform mat4 proj;
+
+                out vec3 v_color;
+
+                void main() {
+                    // Calculate World Position
+                    vec3 world_pos = (in_vert * in_scale) + in_pos;
+                    gl_Position = proj * view * vec4(world_pos, 1.0);
+
+                    // Fade color based on scale (proxy for life)
+                    float life = in_scale / 0.15; 
+                    v_color = vec3(0.7, 0.7, 0.8) * life;
+                }
+            ''',
+            fragment_shader='''
+                #version 330 core
+                out vec4 out_color;
+                in vec3 v_color;
+                void main() { out_color = vec4(v_color, 1.0); }
+            ''',
+            framebuffer=[self.image, self.depth],
+            topology='triangles',
+            depth={'func': 'less', 'write': False},  # Particles usually don't write depth (optional)
+            vertex_buffers=[
+                *zengl.bind(self.vbo, '3f', 0),  # The Cube Mesh
+                *zengl.bind(self.instance_buffer, '3f 1f /i', 1, 2)  # The Particle Data (/i = per instance)
+            ],
+            uniforms={'view': [0.0] * 16, 'proj': [0.0] * 16},
+            vertex_count=36,
+            instance_count=0,  # We will set this every frame
+        )
+
+        self.cam_x, self.cam_y, self.cam_z = 0, 3, 5
+
+    def _render_obj(self, r, g, b):
+        # BUFFERS ARE NOW ALREADY TRANSPOSED (Column-Major)
+        # We can cast them directly without .T
+
+        self.pipeline_3d.uniforms['mvp'][:] = memoryview(self.mvp_buf).cast('B')
+        self.pipeline_3d.uniforms['model'][:] = memoryview(self.model_buf).cast('B')
+
+        self.color_buf[0] = r
+        self.color_buf[1] = g
+        self.color_buf[2] = b
+        self.pipeline_3d.uniforms['color'][:] = memoryview(self.color_buf).cast('B')
+
+        self.pipeline_3d.render()
 
     def draw(self, px, py, pz, cam_yaw, cam_pitch, zoom_dist, dt):
         self.ctx.new_frame()
@@ -360,47 +495,67 @@ class Renderer:
         self.depth.clear()
 
         aspect = WINDOW_SIZE[0] / WINDOW_SIZE[1]
-        proj = get_perspective(60.0, aspect, 0.1, 100.0)
+        get_perspective(60.0, aspect, 0.1, 100.0, out=self.proj_buf)
 
-        # Calculate Camera Position based on Zoom
-        # Note: We rely on the 'zoom_dist' passed from physics engine
-        # which has already checked for wall collisions.
+
+        # Camera Smooth Follow (could change px, py, pz to rx, ry, rz... maybe)
         target_cam_x = px - np.cos(cam_yaw) * np.cos(cam_pitch) * zoom_dist
-        target_cam_y = py - np.sin(cam_pitch) * zoom_dist + 1.0  # +1.0 offset (pivot height)
+        target_cam_y = py - np.sin(cam_pitch) * zoom_dist
         target_cam_z = pz - np.sin(cam_yaw) * np.cos(cam_pitch) * zoom_dist
 
-        smooth = 1.0 - 0.01 ** (dt * 10.0)  # Faster camera follow
-        self.cam_x += (target_cam_x - self.cam_x) * smooth
-        self.cam_y += (target_cam_y - self.cam_y) * smooth
-        self.cam_z += (target_cam_z - self.cam_z) * smooth
+        self.cam_x += (target_cam_x - self.cam_x) * 0.1
+        self.cam_y += (target_cam_y - self.cam_y) * 0.1
+        self.cam_z += (target_cam_z - self.cam_z) * 0.1
 
-        view = get_lookat(
-            np.array([self.cam_x, self.cam_y, self.cam_z], dtype='f4'),
-            np.array([px, py + 0.5, pz], dtype='f4'),
-            np.array([0.0, 1.0, 0.0], dtype='f4')
+        get_lookat(
+            np.array([self.cam_x, self.cam_y, self.cam_z], 'f4'),
+            np.array([px, py + 0.5, pz], 'f4'),
+            np.array([0, 1, 0], 'f4'),
+            out=self.view_buf
         )
+        # Since buffers are Column-Major (A^T, B^T),
+        # (P * V)^T = V^T * P^T
+        # So we mul View_Buf @ Proj_Buf
+        np.matmul(self.view_buf, self.proj_buf, out=self.view_proj_buf)
 
-        def render_obj(model, color):
-            mvp = proj @ view @ model
-            self.pipeline_3d.uniforms['mvp'][:] = mvp.T.tobytes()
-            self.pipeline_3d.uniforms['model'][:] = model.T.tobytes()
-            self.pipeline_3d.uniforms['color'][:] = struct.pack('3f', *color)
-            self.pipeline_3d.render()
-
+        # --- DRAW PLATFORMS ---
         for p in self.platforms:
-            m = get_model_matrix(p.x, p.y, p.z, p.hw * 2, p.hh * 2, p.hd * 2)
-            render_obj(m, (0.3, 0.7, 0.4))
+            # 1. Write Model Matrix (In-Place)
+            get_model_matrix(self.model_buf, p.x, p.y, p.z, p.hw * 2, p.hh * 2, p.hd * 2)
 
-        m_p = get_model_matrix(px, py, pz, 0.4, 0.4, 0.4)
-        render_obj(m_p, (1.0, 0.5, 0.0))
+            # 2. Calculate MVP (In-Place)
+            # mvp = view_proj * model
+            np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
 
-        for i in range(physics.max_particles):
-            life = physics.p_life[i]
-            if life > 0:
-                s = life * 0.08
-                pos = physics.p_pos[i]
-                m_part = get_model_matrix(pos[0], pos[1], pos[2], s, s, s)
-                render_obj(m_part, (0.7 * life, 0.7 * life, 0.8 * life))
+            # 3. Render
+            self._render_obj(0.3, 0.7, 0.4)
+
+        get_model_matrix(self.model_buf, px, py, pz, 0.4, 0.4, 0.4)
+        np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
+        self._render_obj(1.0, 0.5, 0.0)
+
+        # --- OPTIMIZED PARTICLE DRAW ---
+        # 1. Filter active particles
+        active_indices = physics.p_life > 0
+        count = np.sum(active_indices)
+
+        if count > 0:
+            # Combine into one array (N, 4)
+            # We stack [pos_x, pos_y, pos_z] with [scale]
+            self.particle_staging[:count, 0:3] = physics.p_pos[active_indices]
+            self.particle_staging[:count, 3] = physics.p_life[active_indices] * 0.15
+
+            # 3. Upload to GPU
+            self.instance_buffer.write(offset=0, data=self.particle_staging[:count]) # fixed smelly code
+
+            self.pipeline_particles.instance_count = int(count)
+
+            # 4. Draw ALL particles (fixed smelly code here too)
+            # Buffers are already formatted correctly, just cast directly
+            self.pipeline_particles.uniforms['view'][:] = memoryview(self.view_buf).cast('B')
+            self.pipeline_particles.uniforms['proj'][:] = memoryview(self.proj_buf).cast('B')
+
+            self.pipeline_particles.render()
 
         self.image.blit()
         self.ctx.end_frame()
