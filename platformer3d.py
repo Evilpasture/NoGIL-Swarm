@@ -4,6 +4,8 @@ import numpy as np
 import struct
 import time
 import sys
+import os
+import json
 from dataclasses import dataclass
 
 # verify
@@ -127,80 +129,122 @@ class PhysicsEngine:
 
     def step(self, dt):
         px, py, pz, vx, vy, vz = self.player_data
-
         GRAVITY = -30.0
         JUMP_FORCE = 10.0
-        MOVE_ACCEL = 50.0
-        FRICTION = 10.0
-        MAX_FALL_SPEED = -20.0
+        ACCEL = 50.0
+        AIR_ACCEL = 10.0
 
-        # Forces
+        FRICTION = 10.0 if self.on_ground else 0.5
+        current_accel = ACCEL if self.on_ground else AIR_ACCEL
+
         vy += GRAVITY * dt
-        vy = max(vy, MAX_FALL_SPEED)
-        vx -= vx * FRICTION * dt
-        vz -= vz * FRICTION * dt
+        vy = max(vy, -30.0)
+        damping = 1.0 / (1.0 + FRICTION * dt)
+        vx *= damping
+        vz *= damping
 
-        # Input
         for_x, for_z = np.cos(self.cam_yaw), np.sin(self.cam_yaw)
         right_x, right_z = np.cos(self.cam_yaw + np.pi / 2), np.sin(self.cam_yaw + np.pi / 2)
+        ix, iz = 0.0, 0.0
+        if self.keys.get(glfw.KEY_W): ix += for_x; iz += for_z
+        if self.keys.get(glfw.KEY_S): ix -= for_x; iz -= for_z
+        if self.keys.get(glfw.KEY_A): ix -= right_x; iz -= right_z
+        if self.keys.get(glfw.KEY_D): ix += right_x; iz += right_z
 
-        acc_x, acc_z = 0.0, 0.0
-        if self.keys.get(glfw.KEY_W): acc_x += for_x; acc_z += for_z
-        if self.keys.get(glfw.KEY_S): acc_x -= for_x; acc_z -= for_z
-        if self.keys.get(glfw.KEY_A): acc_x -= right_x; acc_z -= right_z
-        if self.keys.get(glfw.KEY_D): acc_x += right_x; acc_z += right_z
-
-        if acc_x != 0 or acc_z != 0:
-            length = np.sqrt(acc_x ** 2 + acc_z ** 2)
-            vx += (acc_x / length) * MOVE_ACCEL * dt
-            vz += (acc_z / length) * MOVE_ACCEL * dt
+        if ix != 0 or iz != 0:
+            l = np.sqrt(ix * ix + iz * iz)
+            vx += (ix / l) * current_accel * dt
+            vz += (iz / l) * current_accel * dt
 
         if self.keys.get(glfw.KEY_SPACE) and self.on_ground:
-            self.spawn_burst(px, py - 0.1, pz, 20, (1.0, 1.0, 1.0))
+            self.spawn_burst(px, py - 0.1, pz, 20)
             vy = JUMP_FORCE
             self.on_ground = False
 
-        # --- Collision ---
+        # --- COLLISION LOGIC ---
 
-        # X Axis
+        # Allowance: How deep can we be inside a block vertically before we consider it a wall?
+        # 0.25 covers falling speed and small steps.
+        VERTICAL_ALLOWANCE = 0.25
+
+        # 1. X-AXIS
         px += vx * dt
-        for plat in self.platforms:
-            if self.check_overlap(px, py, pz, plat, vy=vy, strict=False):
-                if px < plat.x:
-                    px = plat.x - plat.hw - self.pw - 0.001
+        for p in self.platforms:
+            if self.check_overlap(px, py, pz, p):
+                # Vertical Filtering:
+                # If our feet are near the top, it's a floor.
+                feet_y = py - self.ph
+                plat_top = p.y + p.hh
+                if feet_y >= plat_top - VERTICAL_ALLOWANCE:
+                    continue  # Ignore X collision (it's a floor)
+
+                # If our head is near the bottom, it's a ceiling.
+                head_y = py + self.ph
+                plat_bot = p.y - p.hh
+                if head_y <= plat_bot + VERTICAL_ALLOWANCE:
+                    continue  # Ignore X collision (it's a ceiling)
+
+                # Otherwise, it is a wall. Resolve X.
+                if px < p.x:
+                    px = p.x - p.hw - self.pw - 0.001
                 else:
-                    px = plat.x + plat.hw + self.pw + 0.001
+                    px = p.x + p.hw + self.pw + 0.001
                 vx = 0
 
-        # Z Axis
+        # 2. Z-AXIS
         pz += vz * dt
-        for plat in self.platforms:
-            if self.check_overlap(px, py, pz, plat, vy=vy, strict=False):
-                if pz < plat.z:
-                    pz = plat.z - plat.hd - self.pd - 0.001
+        for p in self.platforms:
+            if self.check_overlap(px, py, pz, p):
+                # EXACT SAME FILTERING
+                feet_y = py - self.ph
+                plat_top = p.y + p.hh
+                if feet_y >= plat_top - VERTICAL_ALLOWANCE:
+                    continue
+
+                head_y = py + self.ph
+                plat_bot = p.y - p.hh
+                if head_y <= plat_bot + VERTICAL_ALLOWANCE:
+                    continue
+
+                    # Resolve Z
+                if pz < p.z:
+                    pz = p.z - p.hd - self.pd - 0.001
                 else:
-                    pz = plat.z + plat.hd + self.pd + 0.001
+                    pz = p.z + p.hd + self.pd + 0.001
                 vz = 0
 
-        # Y Axis (Strict Mode)
+        # 3. Y-AXIS
+        prev_py = py
         py += vy * dt
         self.on_ground = False
 
-        speed = np.sqrt(vx ** 2 + vz ** 2)
+        # Visuals
+        speed = np.sqrt(vx * vx + vz * vz)
         if speed > 0.5 and self.on_ground:
             self.spawn_burst(px, py - 0.1, pz, 1, (0.4, 0.4, 0.4))
 
-        for plat in self.platforms:
-            if self.check_overlap(px, py, pz, plat, vy=vy, strict=True):
-                if vy < 0:  # Landing
-                    py = plat.y + plat.hh + self.ph
-                    vy = 0
-                    self.on_ground = True
-                elif vy > 0:  # Hitting Head (Bonk)
-                    py = plat.y - plat.hh - self.ph
-                    vy = 0
+        for p in self.platforms:
+            if self.check_overlap(px, py, pz, p):
+                # Landing Logic
+                # If we were above previously, OR if we are just slightly penetrating the top
+                # Snap to top.
+                if vy <= 0:
+                    feet_y = py - self.ph
+                    plat_top = p.y + p.hh
+                    # If we are effectively at the top (within allowance)
+                    if feet_y >= plat_top - VERTICAL_ALLOWANCE:
+                        py = plat_top + self.ph
+                        vy = 0
+                        self.on_ground = True
 
-        # Void Respawn
+                # Bonk Logic
+                elif vy > 0:
+                    head_y = py + self.ph
+                    plat_bot = p.y - p.hh
+                    if head_y <= plat_bot + VERTICAL_ALLOWANCE:
+                        py = plat_bot - self.ph
+                        vy = 0
+
         if py < -15.0:
             px, py, pz = 0.0, 2.0, 0.0
             vx, vy, vz = 0.0, 0.0, 0.0
@@ -210,31 +254,21 @@ class PhysicsEngine:
         active = self.p_life > 0
         if np.any(active):
             self.p_pos[active] += self.p_vel[active] * dt
-            self.p_vel[active, 1] += GRAVITY * dt  # Particles obey gravity
+            self.p_vel[active, 1] += GRAVITY * dt
             self.p_life[active] -= 2.0 * dt
 
         return px, py, pz
 
-    def check_overlap(self, x, y, z, p, vy=0.0, strict=True):
-        p_min_x, p_max_x = x - self.pw, x + self.pw
-        p_min_y, p_max_y = y - self.ph, y + self.ph
-        p_min_z, p_max_z = z - self.pd, z + self.pd
-
-        plat_min_x, plat_max_x = p.x - p.hw, p.x + p.hw
-        plat_min_y, plat_max_y = p.y - p.hh, p.y + p.hh
-        plat_min_z, plat_max_z = p.z - p.hd, p.z + p.hd
-
-        if p_max_x <= plat_min_x or p_min_x >= plat_max_x: return False
-        if p_max_y <= plat_min_y or p_min_y >= plat_max_y: return False
-        if p_max_z <= plat_min_z or p_min_z >= plat_max_z: return False
-
-        if strict or vy > 0: return True  # Walls are solid if jumping or doing Y-check
-
-        # Step Allowance (Auto-climb small heights)
-        if p_min_y >= (plat_max_y - 0.15):
-            return False
-
-        return True
+    def check_overlap(self, x, y, z, p):
+        # PURE AABB - No Tricks
+        return not (
+                x + self.pw <= p.x - p.hw or
+                x - self.pw >= p.x + p.hw or
+                y + self.ph <= p.y - p.hh or
+                y - self.ph >= p.y + p.hh or
+                z + self.pd <= p.z - p.hd or
+                z - self.pd >= p.z + p.hd
+        )
 
 
 # --- 4. RENDERER ---
@@ -349,20 +383,20 @@ if __name__ == "__main__":
 
     window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer", None, None)
     glfw.make_context_current(window)
-    glfw.swap_interval(0)
+    glfw.swap_interval(1)
 
     glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
     if glfw.raw_mouse_motion_supported():
         glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.TRUE)
-
-    platforms = [
-        Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0),
-        Platform(0.0, 0.5, -5.0, 1.5, 0.2, 1.5),
-        Platform(-5.0, 1.5, 0.0, 1.0, 0.2, 1.0),
-        Platform(5.0, 0.0, 2.0, 1.0, 0.2, 3.0),
-        Platform(0.0, 2.5, -8.0, 0.5, 0.1, 0.5),
-        Platform(0.0, 3.5, 5.0, 4.0, 0.2, 0.5),  # Wide wall to test climbing
-    ]
+    platforms = []
+    if os.path.exists("level.json"):
+        with open("level.json", "r") as f:
+            data = json.load(f)
+            for d in data: platforms.append(Platform(**d))
+        print("Loaded level.json")
+    else:
+        # Default level
+        platforms = [Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0)]
 
     renderer = Renderer(zengl.context(), platforms)
     physics = PhysicsEngine(platforms)
