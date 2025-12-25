@@ -1,7 +1,7 @@
 import glfw
 import zengl
 import numpy as np
-import struct
+import trimesh
 import time
 import sys
 import os
@@ -391,76 +391,149 @@ class Renderer:
 
         self.color_buf = np.array([1.0, 1.0, 1.0], dtype='f4')
 
+        # Holds 2 matrices: View (64 bytes) + Proj (64 bytes) = 128 bytes
+        # Binding = 0
+        self.camera_ubo = ctx.buffer(size=128)
+
+        self.camera_ubo_staging = np.empty(32, dtype='f4') # 32 floats = 128 bytes
+
+
+        # Shadow? for later, leaving the commented out code for now
+        self.shadow_map = ctx.image((2048, 2048), 'depth24plus')
+
+        # pipeline_shadow = ctx.pipeline(
+        #     vertex_shader='''
+        #         #version 330 core
+        #         layout (location = 0) in vec3 in_vert;
+        #         uniform mat4 light_mvp;
+        #         void main() {
+        #             gl_Position = light_mvp * vec4(in_vert, 1.0);
+        #         }
+        #     ''',
+        #     fragment_shader='''
+        #         #version 330 core
+        #         // stub
+        #         void main() {
+        #         // stub
+        #         }
+        #     ''',
+        #     framebuffer=[self.shadow_map],  # No color attachment, depth only
+        #     topology='triangles',
+        #     depth={'func': 'less', 'write': True},
+        #     vertex_buffers=[*zengl.bind(self.vbo, '3f', 0)],
+        #     uniforms={'mvp': [0.0] * 16, 'model': [0.0] * 16, 'color': [1.0, 1.0, 1.0]},
+        #     vertex_count=36,
+        # )
+
         # 3. Main 3D Pipeline (For Player & Platforms)
         self.pipeline_3d = ctx.pipeline(
             vertex_shader='''
-                #version 330 core
-                layout (location = 0) in vec3 in_vert;
-                uniform mat4 mvp;
-                uniform mat4 model;
-                uniform vec3 color;
-                out vec3 v_color;
-                out vec3 v_world_pos;
+                #version 450 core
+                layout(location = 0) in vec3 in_vert;
+
+                // 1. Shared Data via UBO (Binding 0)
+                layout(std140, binding = 0) uniform Camera {
+                    mat4 view;
+                    mat4 proj;
+                };
+
+                // 2. Per-Object Data via Standard Uniforms
+                // These change every draw call, so they are faster as standard uniforms
+                layout(location = 0) uniform mat4 mvp;
+                layout(location = 1) uniform mat4 model;
+                layout(location = 2) uniform vec3 color;
+
+                layout(location = 0) out vec3 v_color;
+                layout(location = 1) out vec3 v_world_pos;
+
                 void main() {
                     v_color = color;
-                    v_world_pos = vec3(model * vec4(in_vert, 1.0));
+                    v_world_pos = (model * vec4(in_vert, 1.0)).xyz;
                     gl_Position = mvp * vec4(in_vert, 1.0);
                 }
             ''',
             fragment_shader='''
-                #version 330 core
-                out vec4 out_color;
-                in vec3 v_color;
-                in vec3 v_world_pos;
+                #version 450 core
+                layout(location = 0) in vec3 v_color;
+                layout(location = 1) in vec3 v_world_pos;
+                layout(location = 0) out vec4 out_color;
                 void main() {
-                    vec3 dx = dFdx(v_world_pos);
-                    vec3 dy = dFdy(v_world_pos);
-                    vec3 normal = normalize(cross(dx, dy));
+                    vec3 normal = normalize(cross(dFdx(v_world_pos), dFdy(v_world_pos)));
                     vec3 sun_dir = normalize(vec3(0.5, 0.8, 0.3));
                     float diff = max(dot(normal, sun_dir), 0.0);
                     vec3 ambient = vec3(0.2, 0.2, 0.3);
-                    out_color = vec4(v_color * (diff + 0.5) + (v_color * ambient), 1.0);
+                    out_color = vec4(v_color * (diff + 0.5) + v_color * ambient, 1.0);
                 }
             ''',
+            layout=[
+                {
+                    'name': 'Camera',
+                    'binding': 0,
+                },
+            ],
+            resources=[
+                {
+                    'type': 'uniform_buffer',
+                    'binding': 0,
+                    'buffer': self.camera_ubo,
+                },
+            ],
             framebuffer=[self.image, self.depth],
             topology='triangles',
             depth={'func': 'less', 'write': True},
-            vertex_buffers=[*zengl.bind(self.vbo, '3f', 0)],
-            uniforms={'mvp': [0.0] * 16, 'model': [0.0] * 16, 'color': [1.0, 1.0, 1.0]},
+            vertex_buffers=[*zengl.bind(self.vbo, '3f', 0), ],
+            # Note: We bind the UBO globally in draw(), not here in 'uniforms' dict
+            # We only define standard uniforms here
+            uniforms={
+                'mvp': [0.0] * 16,
+                'model': [0.0] * 16,
+                'color': [1.0, 1.0, 1.0]
+            },
             vertex_count=36,
         )
 
         # 4. Particle Pipeline (INSTANCED)
         self.pipeline_particles = ctx.pipeline(
             vertex_shader='''
-                #version 330 core
-                layout (location = 0) in vec3 in_vert;
+                #version 450 core
+                layout(location = 0) in vec3 in_vert;
+                layout(location = 1) in vec3 in_pos; 
+                layout(location = 2) in float in_scale;
 
-                // Per-Instance Attributes (Buffer binding 1)
-                layout (location = 1) in vec3 in_pos; 
-                layout (location = 2) in float in_scale;
+                // UBO Binding 0 (Shared with Main Pipeline!)
+                layout(std140, binding = 0) uniform Camera {
+                    mat4 view;
+                    mat4 proj;
+                };
 
-                uniform mat4 view;
-                uniform mat4 proj;
-
-                out vec3 v_color;
+                layout(location = 0) out vec3 v_color;
 
                 void main() {
-                    // Calculate World Position
-                    vec3 world_pos = (in_vert * in_scale) + in_pos;
+                    vec3 world_pos = in_pos + in_vert * in_scale;
                     gl_Position = proj * view * vec4(world_pos, 1.0);
-
-                    // Fade color based on scale (proxy for life)
                     float life = in_scale / 0.15; 
                     v_color = vec3(0.7, 0.7, 0.8) * life;
                 }
             ''',
             fragment_shader='''
-                #version 330 core
+                #version 450 core
                 out vec4 out_color;
                 in vec3 v_color;
                 void main() { out_color = vec4(v_color, 1.0); }
             ''',
+            layout=[
+                {
+                    'name': 'Camera',
+                    'binding': 0,
+                },
+            ],
+            resources=[
+                {
+                    'type': 'uniform_buffer',
+                    'binding': 0,
+                    'buffer': self.camera_ubo,
+                },
+            ],
             framebuffer=[self.image, self.depth],
             topology='triangles',
             depth={'func': 'less', 'write': False},  # Particles usually don't write depth (optional)
@@ -468,25 +541,20 @@ class Renderer:
                 *zengl.bind(self.vbo, '3f', 0),  # The Cube Mesh
                 *zengl.bind(self.instance_buffer, '3f 1f /i', 1, 2)  # The Particle Data (/i = per instance)
             ],
-            uniforms={'view': [0.0] * 16, 'proj': [0.0] * 16},
+            uniforms={},
             vertex_count=36,
-            instance_count=0,  # We will set this every frame
+            instance_count=0,
         )
 
         self.cam_x, self.cam_y, self.cam_z = 0, 3, 5
 
     def _render_obj(self, r, g, b):
-        # BUFFERS ARE NOW ALREADY TRANSPOSED (Column-Major)
-        # We can cast them directly without .T
-
         self.pipeline_3d.uniforms['mvp'][:] = memoryview(self.mvp_buf).cast('B')
         self.pipeline_3d.uniforms['model'][:] = memoryview(self.model_buf).cast('B')
-
         self.color_buf[0] = r
         self.color_buf[1] = g
         self.color_buf[2] = b
         self.pipeline_3d.uniforms['color'][:] = memoryview(self.color_buf).cast('B')
-
         self.pipeline_3d.render()
 
     def draw(self, px, py, pz, cam_yaw, cam_pitch, zoom_dist, dt):
@@ -513,6 +581,16 @@ class Renderer:
             np.array([0, 1, 0], 'f4'),
             out=self.view_buf
         )
+
+        # We assume the layout in the shader is "view" then "proj"
+        # Since buffers are Column-Major, we upload them directly.
+        # Pack data into staging array: [View (16 floats)] + [Proj (16 floats)]
+        self.camera_ubo_staging[:16] = self.view_buf.flatten()
+        self.camera_ubo_staging[16:] = self.proj_buf.flatten()
+
+        # Write to GPU once per frame
+        self.camera_ubo.write(self.camera_ubo_staging)
+
         # Since buffers are Column-Major (A^T, B^T),
         # (P * V)^T = V^T * P^T
         # So we mul View_Buf @ Proj_Buf
@@ -520,16 +598,15 @@ class Renderer:
 
         # --- DRAW PLATFORMS ---
         for p in self.platforms:
-            # 1. Write Model Matrix (In-Place)
             get_model_matrix(self.model_buf, p.x, p.y, p.z, p.hw * 2, p.hh * 2, p.hd * 2)
-
-            # 2. Calculate MVP (In-Place)
-            # mvp = view_proj * model
+            # (P * V * M)^T = M^T * (V^T * P^T)
             np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
+            self._render_obj(0.3, 0.7, 0.4)
 
             # 3. Render
             self._render_obj(0.3, 0.7, 0.4)
 
+        # Draw player
         get_model_matrix(self.model_buf, px, py, pz, 0.4, 0.4, 0.4)
         np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
         self._render_obj(1.0, 0.5, 0.0)
@@ -540,21 +617,10 @@ class Renderer:
         count = np.sum(active_indices)
 
         if count > 0:
-            # Combine into one array (N, 4)
-            # We stack [pos_x, pos_y, pos_z] with [scale]
             self.particle_staging[:count, 0:3] = physics.p_pos[active_indices]
             self.particle_staging[:count, 3] = physics.p_life[active_indices] * 0.15
-
-            # 3. Upload to GPU
-            self.instance_buffer.write(offset=0, data=self.particle_staging[:count]) # fixed smelly code
-
+            self.instance_buffer.write(offset=0, data=self.particle_staging[:count])
             self.pipeline_particles.instance_count = int(count)
-
-            # 4. Draw ALL particles (fixed smelly code here too)
-            # Buffers are already formatted correctly, just cast directly
-            self.pipeline_particles.uniforms['view'][:] = memoryview(self.view_buf).cast('B')
-            self.pipeline_particles.uniforms['proj'][:] = memoryview(self.proj_buf).cast('B')
-
             self.pipeline_particles.render()
 
         self.image.blit()
@@ -563,8 +629,8 @@ class Renderer:
 
 if __name__ == "__main__":
     glfw.init()
-    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 5)
     glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
     glfw.window_hint(glfw.SAMPLES, 4)
 
