@@ -9,10 +9,6 @@ import threading
 import time
 import gc
 
-from zengl_extras import init
-
-init(debug=True, gpu=False, dpi_aware=False, high_performance=False, opengl_core=False) # ignore this, just extra util
-
 gc.disable()
 
 # 1. Initialize Window & Context
@@ -24,6 +20,7 @@ is_free_threaded = hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled() == 
 GIL_STATE = "No GIL (True Parallelism)" if is_free_threaded else "GIL Active"
 print(f"Python {sys.version.split()[0]} | {GIL_STATE}")
 gil_tpl = f"3.14t Swarm | {GIL_STATE}"
+print(f"JIT Active: {getattr(sys.flags, 'experimental_jit', False)}")
 
 glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
 glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 5)
