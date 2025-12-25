@@ -234,6 +234,11 @@ render_pipelines = [
         framebuffer=[image],
         topology='points',
         vertex_count=TRIANGLE_COUNT,
+        blend={
+            'enable': True,
+            'src_color': 'src_alpha',
+            'dst_color': 'one_minus_src_alpha'
+        },
     ),
     ctx.pipeline(
         vertex_shader=render_vs,
@@ -247,6 +252,11 @@ render_pipelines = [
         framebuffer=[image],
         topology='points',
         vertex_count=TRIANGLE_COUNT,
+        blend={
+            'enable': True,
+            'src_color': 'src_alpha',
+            'dst_color': 'one_minus_src_alpha'
+        },
     )
 ]
 
@@ -261,7 +271,11 @@ fade_pipe = ctx.pipeline(
     framebuffer=[image],
     topology='triangle_strip',
     vertex_count=4,
-    blend={'enable': True, 'src_color': 'src_alpha', 'dst_color': 'one_minus_src_alpha'},
+    blend={
+        'enable': True,
+        'src_color': 'src_alpha',
+        'dst_color': 'one_minus_src_alpha'
+    },
 )
 
 # 4. LOOP
