@@ -71,7 +71,7 @@ tex_props = ctx.image(texture_size, 'r32float', data=prop_bytes)
 # This renders a full-screen quad over the TEXTURE, not the screen.
 # It reads the previous state and writes the new state.
 physics_shader = '''
-    #version 450 core
+    #version 460 core
 
     uniform sampler2D State;
     uniform sampler2D Props;
@@ -103,13 +103,33 @@ physics_shader = '''
         if (Repel) {
             force = -1200.0 * (inv_dist * inv_dist * inv_dist) * 12000.0;
         } else {
-            force = 40.0 * inv_dist;
+            force = 100.0 * inv_dist;
         }
 
         vec2 acc = (d * force + MouseVel * 5.0) * ip;
+        
+        vec2 dir = normalize(d);
+        vec2 orbit = vec2(-dir.y, dir.x) * (inv_dist * 2000.0);
+        
+        // 1. Use a much larger fixed time step for the math 
+        // OR pass a larger constant from Python (e.g., 0.016)
+        // float effective_dt = 0.016; 
 
-        v = (v + acc * Dt) * 0.99;
-        p = p + v;
+        // 2. High-speed Damping: Only damp based on real time, not frames
+        // This keeps 90% of velocity after 1 second, regardless of FPS
+        float damping = pow(0.9, Dt); 
+        v = v + acc * Dt + orbit * Dt;
+        
+        // 3. Speed Cap (Raise this! 20.0 is very slow for GPGPU)
+        float max_speed = 500.0; 
+        v = normalize(v) * min(length(v), max_speed);
+        
+        float damping_factor_per_second = 0.9;
+        v *= pow(damping_factor_per_second, Dt);
+
+        
+        // 4. Move based on the larger timestep
+        p = p + v * Dt;
 
         // Boundary Wrap
         // (p + 640) % 1280 - 640  ->  mod(p + 640, 1280) - 640
@@ -121,7 +141,7 @@ physics_shader = '''
 
 # Standard fullscreen quad vertex shader
 quad_vs = '''
-    #version 450 core
+    #version 460 core
     vec2 positions[4] = vec2[](
         vec2(-1.0, -1.0), vec2(1.0, -1.0),
         vec2(-1.0,  1.0), vec2(1.0,  1.0)
@@ -178,7 +198,7 @@ step_pipelines = [
 
 # --- RENDER PIPELINE ---
 # Reads positions AND velocity from the texture to draw points
-render_vs = f'''
+render_vs = '''
     #version 450 core
 
     uniform sampler2D State;
@@ -188,7 +208,7 @@ render_vs = f'''
     // Send color to fragment shader
     out vec3 v_Color;
 
-    void main() {{
+    void main() {
         int id = gl_VertexID;
         ivec2 coord = ivec2(id & WidthMask, id >> WidthShift);
 
@@ -206,7 +226,7 @@ render_vs = f'''
 
         gl_PointSize = 1.0;
         gl_Position = vec4(pos / vec2(640.0, 360.0), 0.0, 1.0);
-    }}
+    }
 '''
 
 render_fs = '''
