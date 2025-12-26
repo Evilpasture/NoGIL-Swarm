@@ -173,7 +173,7 @@ class PhysicsEngine:
             add_speed = max_speed - current_speed_in_wish_dir
             if add_speed > 0:
                 accel_speed = min(accel * dt, add_speed)
-                vx += wish_dir_x * accel_speed;
+                vx += wish_dir_x * accel_speed
                 vz += wish_dir_z * accel_speed
 
         if self.keys.get(glfw.KEY_SPACE) and self.on_ground:
@@ -212,11 +212,11 @@ class PhysicsEngine:
         for p in self.platforms:
             if self.check_overlap(px, py, pz, p):
                 if vy <= 0 and py - self.ph >= p.y + p.hh - VERTICAL_ALLOWANCE:
-                    py = p.y + p.hh + self.ph;
-                    vy = 0;
+                    py = p.y + p.hh + self.ph
+                    vy = 0
                     self.on_ground = True
                 elif vy > 0 and py + self.ph <= p.y - p.hh + VERTICAL_ALLOWANCE:
-                    py = p.y - p.hh - self.ph;
+                    py = p.y - p.hh - self.ph
                     vy = 0
 
         if py < -15.0: px, py, pz, vx, vy, vz = 0.0, 2.0, 0.0, 0.0, 0.0, 0.0
@@ -467,7 +467,7 @@ if __name__ == "__main__":
     app_state = GameState()
     renderer = Renderer(zengl.context(), platforms)
     physics = PhysicsEngine(platforms)
-    editor = Editor(platforms)
+    editor = Editor(platforms, Platform, ray_aabb_intersect)
 
 
     def on_key(win, key, scancode, action, mods):

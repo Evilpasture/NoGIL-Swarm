@@ -1,11 +1,12 @@
 import glfw
 import numpy as np
 import json
-from ..platformer3d import Platform, ray_aabb_intersect
 
 class Editor:
-    def __init__(self, platforms):
+    def __init__(self, platforms, _Platform, _ray_aabb_intersect):
         self.platforms = platforms
+        self.Platform = _Platform
+        self.ray_aabb_intersect = _ray_aabb_intersect
         self.selected_index = -1
         self.keys = {}
         # Editor "Free Cam" state
@@ -37,7 +38,7 @@ class Editor:
         for i, p in enumerate(self.platforms):
             b_min = np.array([p.x - p.hw, p.y - p.hh, p.z - p.hd])
             b_max = np.array([p.x + p.hw, p.y + p.hh, p.z + p.hd])
-            dist = ray_aabb_intersect(origin, direction, b_min, b_max)
+            dist = self.ray_aabb_intersect(origin, direction, b_min, b_max)
             if dist != float('inf') and dist < closest:
                 closest, idx = dist, i
         self.selected_index = idx
@@ -51,7 +52,7 @@ class Editor:
                 ny = self.cam_y + np.sin(self.cam_pitch) * dist
                 nz = self.cam_z + np.sin(self.cam_yaw) * dist
                 nx, ny, nz = round(nx * 2) / 2, round(ny * 2) / 2, round(nz * 2) / 2
-                self.platforms.append(Platform(nx, ny, nz, 1.0, 0.2, 1.0))
+                self.platforms.append(self.Platform(nx, ny, nz, 1.0, 0.2, 1.0))
                 self.selected_index = len(self.platforms) - 1
 
             # Delete Platform
