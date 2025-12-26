@@ -1,6 +1,7 @@
 import glfw
 import numpy as np
 import json
+from pathlib import Path
 
 class Editor:
     def __init__(self, platforms, _Platform, _ray_aabb_intersect):
@@ -23,6 +24,8 @@ class Editor:
         if self.keys.get(glfw.KEY_S): self.cam_x -= cx * speed; self.cam_z -= cz * speed
         if self.keys.get(glfw.KEY_A): self.cam_x -= rx * speed; self.cam_z -= rz * speed
         if self.keys.get(glfw.KEY_D): self.cam_x += rx * speed; self.cam_z += rz * speed
+        if self.keys.get(glfw.KEY_SPACE): self.cam_y += speed
+        if self.keys.get(glfw.KEY_LEFT_CONTROL): self.cam_y -= speed
         if self.keys.get(glfw.KEY_E): self.cam_y += speed
         if self.keys.get(glfw.KEY_Q): self.cam_y -= speed
 
@@ -42,6 +45,7 @@ class Editor:
             if dist != float('inf') and dist < closest:
                 closest, idx = dist, i
         self.selected_index = idx
+        print(f"Selected: {idx}")
 
     def handle_input(self, key, action, mods):
         if action == glfw.PRESS:
@@ -62,7 +66,8 @@ class Editor:
 
             # Save
             if key == glfw.KEY_F5:
-                with open('level.json', 'w') as f: json.dump([p.to_dict() for p in self.platforms], f)
+                level = Path(__file__).parent / "level.json"
+                with open(level, 'w') as f: json.dump([p.to_dict() for p in self.platforms], f)
                 print("Saved level.json")
 
         # Modification Logic (Move/Resize)

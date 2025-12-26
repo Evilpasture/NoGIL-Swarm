@@ -4,6 +4,7 @@ import numpy as np
 import time
 import sys
 import os
+from pathlib import Path
 import json
 from dataclasses import dataclass
 from platformer3d.platformer3d_editor import Editor
@@ -270,6 +271,7 @@ class Renderer:
         self.mvp_buf = np.eye(4, dtype='f4')
         self.color_buf = np.array([1.0, 1.0, 1.0], dtype='f4')
         self.selected_buf = np.array([0], dtype='i4')  # For GLSL 450 boolean
+        self.time_buf = np.array([0.0], dtype='f4')
 
         # Shared UBO
         self.camera_ubo = ctx.buffer(size=128)
@@ -292,10 +294,12 @@ class Renderer:
 
                 layout(location = 0) out vec3 v_color;
                 layout(location = 1) out vec3 v_world_pos;
+                layout(location = 2) out vec3 v_local_pos; // Pass local for edge detection
 
                 void main() {
                     v_color = color;
                     v_world_pos = (model * vec4(in_vert, 1.0)).xyz;
+                    v_local_pos = in_vert; 
                     gl_Position = mvp * vec4(in_vert, 1.0);
                 }
             ''',
@@ -303,8 +307,13 @@ class Renderer:
                 #version 450 core
                 layout(location = 0) in vec3 v_color;
                 layout(location = 1) in vec3 v_world_pos;
+                layout(location = 2) in vec3 v_local_pos;
+
                 layout(location = 3) uniform int is_selected; 
+                layout(location = 4) uniform float u_time;
+
                 layout(location = 0) out vec4 out_color;
+
                 void main() {
                     vec3 normal = normalize(cross(dFdx(v_world_pos), dFdy(v_world_pos)));
                     vec3 sun_dir = normalize(vec3(0.5, 0.8, 0.3));
@@ -312,8 +321,21 @@ class Renderer:
                     vec3 ambient = vec3(0.2, 0.2, 0.3);
                     vec3 final_color = v_color * (diff + 0.5) + v_color * ambient;
 
+                    // --- HIGHLIGHT LOGIC ---
                     if (is_selected == 1) {
-                        final_color = final_color * 0.5 + vec3(0.5, 0.5, 0.0);
+                        // 1. Pulsing Body
+                        float pulse = (sin(u_time * 5.0) * 0.5 + 0.5) * 0.3; 
+                        final_color += vec3(0.2, 0.2, 0.0) + (vec3(0.8, 0.8, 0.0) * pulse);
+
+                        // 2. Wireframe/Edge Detection (Box Topology)
+                        // Local pos is -0.5 to 0.5. Check if we are near +/- 0.48
+                        vec3 a = step(0.48, abs(v_local_pos)); 
+                        // If 2 components are near edge, it's a line. If 3, it's a corner.
+                        float is_edge = max(max(a.x * a.y, a.y * a.z), a.x * a.z);
+
+                        if (is_edge > 0.0) {
+                            final_color = vec3(1.0, 0.9, 0.2); // Bright Yellow Edge
+                        }
                     }
                     out_color = vec4(final_color, 1.0);
                 }
@@ -324,7 +346,13 @@ class Renderer:
             topology='triangles',
             depth={'func': 'less', 'write': True},
             vertex_buffers=[*zengl.bind(self.vbo, '3f', 0), ],
-            uniforms={'mvp': [0.0] * 16, 'model': [0.0] * 16, 'color': [1.0, 1.0, 1.0], 'is_selected': 0},
+            uniforms={
+                'mvp': [0.0] * 16,
+                'model': [0.0] * 16,
+                'color': [1.0, 1.0, 1.0],
+                'is_selected': 0,
+                'u_time': 0.0
+            },
             vertex_count=36,
         )
 
@@ -370,7 +398,67 @@ class Renderer:
             instance_count=0,
         )
 
+        self.pipeline_grid = ctx.pipeline(
+            vertex_shader='''
+                #version 450 core
+                layout(location = 0) in vec3 in_vert;
+
+                layout(std140, binding = 0) uniform Camera {
+                    mat4 view;
+                    mat4 proj;
+                };
+                uniform mat4 model;
+
+                out vec3 v_world_pos;
+
+                void main() {
+                    vec4 world = model * vec4(in_vert, 1.0);
+                    v_world_pos = world.xyz;
+                    gl_Position = proj * view * world;
+                }
+            ''',
+            fragment_shader='''
+                #version 450 core
+                in vec3 v_world_pos;
+                out vec4 out_color;
+
+                void main() {
+                    // Anti-aliased Grid Logic
+                    vec2 coord = v_world_pos.xz;
+                    vec2 grid = abs(fract(coord - 0.5) - 0.5) / fwidth(coord);
+                    float line = min(grid.x, grid.y);
+                    float alpha = 1.0 - min(line, 1.0);
+
+                    // Thicker lines every 10 units
+                    vec2 grid10 = abs(fract(coord * 0.1 - 0.5) - 0.5) / fwidth(coord * 0.1);
+                    float line10 = min(grid10.x, grid10.y);
+                    float alpha10 = 1.0 - min(line10, 1.0);
+
+                    vec3 color = vec3(0.6); // Grid color
+                    float final_alpha = max(alpha * 0.3, alpha10 * 0.8);
+
+                    // Fade out distance
+                    float dist = length(v_world_pos.xz); // Distance from center
+                    final_alpha *= max(0.0, 1.0 - dist / 50.0);
+
+                    if (final_alpha <= 0.0) discard;
+                    out_color = vec4(color, final_alpha);
+                }
+            ''',
+            layout=[{'name': 'Camera', 'binding': 0}],
+            resources=[{'type': 'uniform_buffer', 'binding': 0, 'buffer': self.camera_ubo}],
+            framebuffer=[self.image, self.depth],
+            topology='triangles',
+            # Grid is transparent, read depth but don't write
+            depth={'func': 'less', 'write': False},
+            blend={'enable': True, 'src_color': 'src_alpha', 'dst_color': 'one_minus_src_alpha'},
+            vertex_buffers=[*zengl.bind(self.vbo, '3f', 0)],
+            uniforms={'model': [0.0] * 16},
+            vertex_count=36,
+        )
+
         self.cam_x, self.cam_y, self.cam_z = 0, 0, 0
+        self.global_time = 0.0
 
     def _render_obj(self, r, g, b, selected=False):
         self.pipeline_3d.uniforms['mvp'][:] = memoryview(self.mvp_buf).cast('B')
@@ -379,12 +467,16 @@ class Renderer:
         self.pipeline_3d.uniforms['color'][:] = memoryview(self.color_buf).cast('B')
         self.selected_buf[0] = 1 if selected else 0
         self.pipeline_3d.uniforms['is_selected'][:] = memoryview(self.selected_buf).cast('B')
+        self.pipeline_3d.uniforms['u_time'][:] = memoryview(self.time_buf).cast('B')
         self.pipeline_3d.render()
 
-    def draw(self, cam_pos, cam_yaw, cam_pitch, player_pos=None, selected_idx=-1):
+    def draw(self, cam_pos, cam_yaw, cam_pitch, player_pos=None, selected_idx=-1, time_now=0.0, is_edit_mode=False):
         self.ctx.new_frame()
         self.image.clear()
         self.depth.clear()
+
+        self.global_time = time_now
+        self.time_buf[0] = time_now
 
         aspect = WINDOW_SIZE[0] / WINDOW_SIZE[1]
         get_perspective(60.0, aspect, 0.1, 100.0, out=self.proj_buf)
@@ -413,6 +505,21 @@ class Renderer:
             np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
             self._render_obj(0.3, 0.7, 0.4, selected=(i == selected_idx))
 
+        # Draw Player
+        if not is_edit_mode and player_pos is not None:
+            px, py, pz = player_pos
+            get_model_matrix(self.model_buf, px, py, pz, 0.4, 0.4, 0.4)
+            np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
+            self._render_obj(1.0, 0.5, 0.0)
+
+        # Draw Grid (Only in Edit Mode)
+        if is_edit_mode:
+            # Scale cube to be a large flat plane at y=0 (or slightly below platforms)
+            # Size 100x100, very thin Y
+            get_model_matrix(self.model_buf, 0.0, -0.05, 0.0, 100.0, 0.01, 100.0)
+            self.pipeline_grid.uniforms['model'][:] = memoryview(self.model_buf).cast('B')
+            self.pipeline_grid.render()
+
         # Draw Particles
         active_indices = physics.p_life > 0
         count = np.sum(active_indices)
@@ -422,14 +529,6 @@ class Renderer:
             self.instance_buffer.write(offset=0, data=self.particle_staging[:count])
             self.pipeline_particles.instance_count = int(count)
             self.pipeline_particles.render()
-
-        # Draw Player (Only if NOT in edit mode, or just always draw it)=
-        if app_state.mode == "PLAY":
-            if player_pos is not None:
-                px, py, pz = player_pos
-                get_model_matrix(self.model_buf, px, py, pz, 0.4, 0.4, 0.4)
-                np.matmul(self.model_buf, self.view_proj_buf, out=self.mvp_buf)
-                self._render_obj(1.0, 0.5, 0.0)
 
         self.image.blit()
         self.ctx.end_frame()
@@ -457,8 +556,9 @@ if __name__ == "__main__":
         glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.TRUE)
 
     platforms = []
-    if os.path.exists("platformer3d/level.json"):
-        with open("platformer3d/level.json", "r") as f:
+    level = Path("platformer3d") / "level.json"
+    if level.exists():
+        with open(level, "r") as f:
             data = json.load(f)
             for d in data: platforms.append(Platform(**d))
     else:
@@ -591,13 +691,21 @@ if __name__ == "__main__":
                 cam_yaw=physics.cam_yaw,
                 cam_pitch=physics.cam_pitch,
                 player_pos=(ix, iy, iz),  # <--- The smooth coordinates
-                selected_idx=-1
+                selected_idx=-1,
+                time_now=current_time,
+                is_edit_mode=False
             )
 
         else:  # EDIT MODE
             editor.update(frame_time)
-            renderer.draw((editor.cam_x, editor.cam_y, editor.cam_z), editor.cam_yaw, editor.cam_pitch,
-                          editor.selected_index)
+            renderer.draw(
+                cam_pos=(editor.cam_x, editor.cam_y, editor.cam_z),
+                cam_yaw=editor.cam_yaw,
+                cam_pitch=editor.cam_pitch,
+                selected_idx=editor.selected_index,
+                time_now=current_time,
+                is_edit_mode=True
+            )
 
         glfw.swap_buffers(window)
         glfw.poll_events()
