@@ -3,7 +3,6 @@ import zengl
 import numpy as np
 import time
 import sys
-import os
 from pathlib import Path
 import json
 from dataclasses import dataclass
@@ -539,175 +538,220 @@ class GameState:
     def __init__(self):
         self.mode = "PLAY"  # or "EDIT"
 
+class Game:
+    TARGET_FPS = 60.0
+    FIXED_DT = 1.0 / TARGET_FPS
+    SUB_STEPS = 4
+    PHYSICS_DT = FIXED_DT / SUB_STEPS
+    def __init__(self, window, app_state, renderer, physics, editor, platforms):
+        self.window = window
+        self.renderer = renderer
+        self.physics = physics
+        self.editor = editor
+        self.app_state = app_state
+        self.platforms = platforms
 
-if __name__ == "__main__":
-    glfw.init()
+    @staticmethod
+    def get_initial_platforms():
+        level = Path("platformer3d") / "level.json"
+        if level.exists():
+            with open(level, "r") as f:
+                data = json.load(f)
+                return [Platform(**d) for d in data]
+        return [Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0)]
+
+    def load_level(self):
+        level = Path("platformer3d") / "level.json"
+        if level.exists():
+            with open(level, "r") as f:
+                data = json.load(f)
+                for d in data: self.platforms.append(Platform(**d))
+        else:
+            self.platforms = [Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0)]
+
+    def on_key(self, win, key, scancode, action, mods):
+        if key == glfw.KEY_ESCAPE: glfw.set_window_should_close(win, True) # add menu soon?
+
+        # Toggle Mode
+        if key == glfw.KEY_TAB and action == glfw.PRESS:
+            self.app_state.mode = "EDIT" if self.app_state.mode == "PLAY" else "PLAY"
+            print(f"Switched to {self.app_state.mode} mode")
+            # Sync Camera positions
+            if self.app_state.mode == "EDIT":
+                # Calculate where the physics camera was
+                zoom = self.physics.current_zoom
+                px, py, pz = self.physics.player_data[0:3]
+                yaw, pitch = self.physics.cam_yaw, self.physics.cam_pitch
+                self.editor.cam_x = px - np.cos(yaw) * np.cos(pitch) * zoom
+                self.editor.cam_y = py - np.sin(pitch) * zoom
+                self.editor.cam_z = pz - np.sin(yaw) * np.cos(pitch) * zoom
+                self.editor.cam_yaw = yaw
+                self.editor.cam_pitch = pitch
+            else:
+                # Sync physics yaw/pitch (approximate)
+                self.physics.cam_yaw = self.editor.cam_yaw
+                self.physics.cam_pitch = self.editor.cam_pitch
+
+        # Input Routing
+        if self.app_state.mode == "PLAY":
+            if action == glfw.PRESS:
+                self.physics.keys[key] = True
+            elif action == glfw.RELEASE:
+                self.physics.keys[key] = False
+        else:
+            if action == glfw.PRESS:
+                self.editor.keys[key] = True
+            elif action == glfw.RELEASE:
+                self.editor.keys[key] = False
+            self.editor.handle_input(key, action, mods)
+
+    def on_mouse(self, win, xpos, ypos):
+        if not hasattr(self, '_last_mouse'):
+            self._last_mouse = (xpos, ypos)
+
+        dx = xpos - self._last_mouse[0]
+        dy = ypos - self._last_mouse[1]
+        self._last_mouse = (xpos, ypos)
+
+        if self.app_state.mode == "PLAY":
+            self.physics.cam_yaw += dx * MOUSE_SENSITIVITY
+            self.physics.cam_pitch -= dy * MOUSE_SENSITIVITY
+            self.physics.cam_pitch = max(-1.5, min(1.5, self.physics.cam_pitch))
+        else:
+            self.editor.cam_yaw += dx * MOUSE_SENSITIVITY
+            self.editor.cam_pitch -= dy * MOUSE_SENSITIVITY
+            self.editor.cam_pitch = max(-1.5, min(1.5, self.editor.cam_pitch))
+
+    def on_mouse_click(self, win, button, action, mods):
+        if self.app_state.mode == "EDIT" and button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+            self.editor.select_object()
+
+    def on_scroll(self, win, xoff, yoff):
+        if self.app_state.mode == "PLAY":
+            self.physics.target_zoom -= yoff * SCROLL_SENSITIVITY
+            self.physics.target_zoom = max(1.0, min(15.0, self.physics.target_zoom))
+
+    def setup_callbacks(self):
+        glfw.set_key_callback(self.window, self.on_key)
+        glfw.set_cursor_pos_callback(self.window, self.on_mouse)
+        glfw.set_mouse_button_callback(self.window, self.on_mouse_click)
+        glfw.set_scroll_callback(self.window, self.on_scroll)
+
+    def run(self):
+        accumulator = 0.0
+        last_time = time.perf_counter()
+
+        px, py, pz = self.physics.player_data[0:3]
+        prev_px, prev_py, prev_pz = px, py, pz
+
+        while not glfw.window_should_close(self.window):
+            current_time = time.perf_counter()
+            frame_time = current_time - last_time
+            last_time = current_time
+            if frame_time > 0.25: frame_time = 0.25
+
+            # Logic Update
+            if self.app_state.mode == "PLAY":
+                accumulator += frame_time
+                while accumulator >= self.FIXED_DT:
+                    prev_px, prev_py, prev_pz = px, py, pz
+                    for _ in range(self.SUB_STEPS):
+                        px, py, pz = self.physics.step(self.PHYSICS_DT)
+                    accumulator -= self.FIXED_DT
+                alpha = accumulator / self.FIXED_DT
+
+                # Interpolated Player Position
+                ix = prev_px * (1.0 - alpha) + px * alpha
+                iy = prev_py * (1.0 - alpha) + py * alpha
+                iz = prev_pz * (1.0 - alpha) + pz * alpha
+
+                # Calculate Follow Cam
+                target_cam_x = ix - np.cos(self.physics.cam_yaw) * np.cos(self.physics.cam_pitch) * self.physics.current_zoom
+                target_cam_y = iy - np.sin(self.physics.cam_pitch) * self.physics.current_zoom
+                target_cam_z = iz - np.sin(self.physics.cam_yaw) * np.cos(self.physics.cam_pitch) * self.physics.current_zoom
+
+                # Simple lerp for camera
+
+                # Smooth factor independent of frame rate
+                # Adjust '18.0' to change tightness (higher = tighter)
+                cam_lerp_config = 18.0
+                cam_lerp = 1.0 - np.exp(-cam_lerp_config * frame_time)
+
+                self.renderer.cam_x += (target_cam_x - self.renderer.cam_x) * cam_lerp
+                self.renderer.cam_y += (target_cam_y - self.renderer.cam_y) * cam_lerp
+                self.renderer.cam_z += (target_cam_z - self.renderer.cam_z) * cam_lerp
+
+                self.renderer.draw(
+                    cam_pos=(self.renderer.cam_x, self.renderer.cam_y, self.renderer.cam_z),
+                    cam_yaw=self.physics.cam_yaw,
+                    cam_pitch=self.physics.cam_pitch,
+                    player_pos=(ix, iy, iz),  # <--- The smooth coordinates
+                    selected_idx=-1,
+                    time_now=current_time,
+                    is_edit_mode=False
+                )
+
+            else:  # EDIT MODE
+                self.editor.update(frame_time)
+                self.renderer.draw(
+                    cam_pos=(self.editor.cam_x, self.editor.cam_y, self.editor.cam_z),
+                    cam_yaw=self.editor.cam_yaw,
+                    cam_pitch=self.editor.cam_pitch,
+                    selected_idx=self.editor.selected_index,
+                    time_now=current_time,
+                    is_edit_mode=True
+                )
+
+            glfw.swap_buffers(self.window)
+            glfw.poll_events()
+
+        glfw.terminate()
+
+def bootstrap_ogl():
+    """Handles all the 'boring' hardware/driver initialization."""
+    if not glfw.init():
+        raise RuntimeError("Failed to initialize GLFW")
+
     glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 5)
     glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
     glfw.window_hint(glfw.SAMPLES, 4)
 
-    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer + Editor", None, None)
+    window = glfw.create_window(WINDOW_SIZE[0], WINDOW_SIZE[1], "ZenGL 3D Platformer", None, None)
+    if not window:
+        glfw.terminate()
+        raise RuntimeError("Failed to create Window")
+
     glfw.make_context_current(window)
     glfw.swap_interval(1)
-
     glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
+
     if glfw.raw_mouse_motion_supported():
         glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.TRUE)
 
-    platforms = []
-    level = Path("platformer3d") / "level.json"
-    if level.exists():
-        with open(level, "r") as f:
-            data = json.load(f)
-            for d in data: platforms.append(Platform(**d))
-    else:
-        platforms = [Platform(0.0, -1.0, 0.0, 4.0, 0.2, 4.0)]
+    return window, zengl.context()
 
+if __name__ == "__main__":
+    window, ctx = bootstrap_ogl()
+
+    # 2. Data and State
     app_state = GameState()
-    renderer = Renderer(zengl.context(), platforms)
+    platforms = Game.get_initial_platforms()
+
+    # 3. Initialize subsystems
+    renderer = Renderer(ctx, platforms)
     physics = PhysicsEngine(platforms)
     editor = Editor(platforms, Platform, ray_aabb_intersect)
 
+    # 4. Create the game, passing the already-created window
+    game = Game(
+        window=window,
+        app_state=app_state,
+        renderer=renderer,
+        physics=physics,
+        editor=editor,
+        platforms=platforms
+    )
 
-    def on_key(win, key, scancode, action, mods):
-        if key == glfw.KEY_ESCAPE: glfw.set_window_should_close(win, True)
-
-        # Toggle Mode
-        if key == glfw.KEY_TAB and action == glfw.PRESS:
-            app_state.mode = "EDIT" if app_state.mode == "PLAY" else "PLAY"
-            print(f"Switched to {app_state.mode} mode")
-            # Sync Camera positions
-            if app_state.mode == "EDIT":
-                # Calculate where the physics camera was
-                zoom = physics.current_zoom
-                px, py, pz = physics.player_data[0:3]
-                yaw, pitch = physics.cam_yaw, physics.cam_pitch
-                editor.cam_x = px - np.cos(yaw) * np.cos(pitch) * zoom
-                editor.cam_y = py - np.sin(pitch) * zoom
-                editor.cam_z = pz - np.sin(yaw) * np.cos(pitch) * zoom
-                editor.cam_yaw = yaw
-                editor.cam_pitch = pitch
-            else:
-                # Sync physics yaw/pitch (approximate)
-                physics.cam_yaw = editor.cam_yaw
-                physics.cam_pitch = editor.cam_pitch
-
-        # Input Routing
-        if app_state.mode == "PLAY":
-            if action == glfw.PRESS:
-                physics.keys[key] = True
-            elif action == glfw.RELEASE:
-                physics.keys[key] = False
-        else:
-            if action == glfw.PRESS:
-                editor.keys[key] = True
-            elif action == glfw.RELEASE:
-                editor.keys[key] = False
-            editor.handle_input(key, action, mods)
-
-
-    def on_mouse(win, xpos, ypos):
-        if not hasattr(on_mouse, 'last_x'): on_mouse.last_x, on_mouse.last_y = xpos, ypos
-        dx = xpos - on_mouse.last_x
-        dy = ypos - on_mouse.last_y
-        on_mouse.last_x, on_mouse.last_y = xpos, ypos
-
-        if app_state.mode == "PLAY":
-            physics.cam_yaw += dx * MOUSE_SENSITIVITY
-            physics.cam_pitch -= dy * MOUSE_SENSITIVITY
-            physics.cam_pitch = max(-1.5, min(1.5, physics.cam_pitch))
-        else:
-            editor.cam_yaw += dx * MOUSE_SENSITIVITY
-            editor.cam_pitch -= dy * MOUSE_SENSITIVITY
-            editor.cam_pitch = max(-1.5, min(1.5, editor.cam_pitch))
-
-
-    def on_mouse_click(win, button, action, mods):
-        if app_state.mode == "EDIT" and button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
-            editor.select_object()
-
-
-    def on_scroll(win, xoff, yoff):
-        if app_state.mode == "PLAY":
-            physics.target_zoom -= yoff * SCROLL_SENSITIVITY
-            physics.target_zoom = max(1.0, min(15.0, physics.target_zoom))
-
-
-    glfw.set_key_callback(window, on_key)
-    glfw.set_cursor_pos_callback(window, on_mouse)
-    glfw.set_mouse_button_callback(window, on_mouse_click)
-    glfw.set_scroll_callback(window, on_scroll)
-
-    TARGET_FPS = 60.0
-    FIXED_DT = 1.0 / TARGET_FPS
-    SUB_STEPS = 4
-    PHYSICS_DT = FIXED_DT / SUB_STEPS
-
-    accumulator = 0.0
-    last_time = time.perf_counter()
-
-    px, py, pz = physics.player_data[0:3]
-    prev_px, prev_py, prev_pz = px, py, pz
-
-    while not glfw.window_should_close(window):
-        current_time = time.perf_counter()
-        frame_time = current_time - last_time
-        last_time = current_time
-        if frame_time > 0.25: frame_time = 0.25
-
-        # Logic Update
-        if app_state.mode == "PLAY":
-            accumulator += frame_time
-            while accumulator >= FIXED_DT:
-                prev_px, prev_py, prev_pz = px, py, pz
-                for _ in range(SUB_STEPS): px, py, pz = physics.step(PHYSICS_DT)
-                accumulator -= FIXED_DT
-            alpha = accumulator / FIXED_DT
-
-            # Interpolated Player Position
-            ix = prev_px * (1.0 - alpha) + px * alpha
-            iy = prev_py * (1.0 - alpha) + py * alpha
-            iz = prev_pz * (1.0 - alpha) + pz * alpha
-
-            # Calculate Follow Cam
-            target_cam_x = ix - np.cos(physics.cam_yaw) * np.cos(physics.cam_pitch) * physics.current_zoom
-            target_cam_y = iy - np.sin(physics.cam_pitch) * physics.current_zoom
-            target_cam_z = iz - np.sin(physics.cam_yaw) * np.cos(physics.cam_pitch) * physics.current_zoom
-
-            # Simple lerp for camera
-
-            # Smooth factor independent of frame rate
-            # Adjust '18.0' to change tightness (higher = tighter)
-            cam_lerp_config = 18.0
-            cam_lerp = 1.0 - np.exp(-cam_lerp_config * frame_time)
-
-            renderer.cam_x += (target_cam_x - renderer.cam_x) * cam_lerp
-            renderer.cam_y += (target_cam_y - renderer.cam_y) * cam_lerp
-            renderer.cam_z += (target_cam_z - renderer.cam_z) * cam_lerp
-
-            renderer.draw(
-                cam_pos=(renderer.cam_x, renderer.cam_y, renderer.cam_z),
-                cam_yaw=physics.cam_yaw,
-                cam_pitch=physics.cam_pitch,
-                player_pos=(ix, iy, iz),  # <--- The smooth coordinates
-                selected_idx=-1,
-                time_now=current_time,
-                is_edit_mode=False
-            )
-
-        else:  # EDIT MODE
-            editor.update(frame_time)
-            renderer.draw(
-                cam_pos=(editor.cam_x, editor.cam_y, editor.cam_z),
-                cam_yaw=editor.cam_yaw,
-                cam_pitch=editor.cam_pitch,
-                selected_idx=editor.selected_index,
-                time_now=current_time,
-                is_edit_mode=True
-            )
-
-        glfw.swap_buffers(window)
-        glfw.poll_events()
-
-    glfw.terminate()
+    game.setup_callbacks()
+    game.run()
